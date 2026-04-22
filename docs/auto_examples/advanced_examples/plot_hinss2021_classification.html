@@ -761,73 +761,6 @@ select electrodes based on the covariance information</p>
 <a href="https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.DataFrame.html#pandas.DataFrame" title="pandas.DataFrame" class="sphx-glr-backref-module-pandas sphx-glr-backref-type-py-class sphx-glr-backref-instance"><span class="n">results</span></a> <span class="o">=</span> <a href="../../generated/moabb.evaluations.base.BaseEvaluation.html#moabb.evaluations.base.BaseEvaluation.process" title="moabb.evaluations.base.BaseEvaluation.process" class="sphx-glr-backref-module-moabb-evaluations-base sphx-glr-backref-type-py-method"><span class="n">evaluation</span><span class="o">.</span><span class="n">process</span></a><span class="p">(</span><a href="https://docs.python.org/3/library/stdtypes.html#dict" title="builtins.dict" class="sphx-glr-backref-module-builtins sphx-glr-backref-type-py-class sphx-glr-backref-instance"><span class="n">pipelines</span></a><span class="p">)</span>
 </pre></div>
 </div>
-<div class="sphx-glr-script-out highlight-none notranslate"><div class="highlight"><pre><span></span>  0%|                                               | 0.00/181M [00:00&lt;?, ?B/s]
-  0%|                                    | 1.02k/181M [00:00&lt;6:50:20, 7.36kB/s]
-  0%|                                       | 34.8k/181M [00:00&lt;25:36, 118kB/s]
-  0%|                                        | 169k/181M [00:00&lt;07:37, 396kB/s]
-  0%|                                        | 335k/181M [00:00&lt;05:10, 583kB/s]
-  0%|                                        | 562k/181M [00:00&lt;03:46, 798kB/s]
-  0%|▏                                      | 840k/181M [00:01&lt;02:57, 1.01MB/s]
-  1%|▏                                     | 1.15M/181M [00:01&lt;02:29, 1.21MB/s]
-  1%|▎                                     | 1.44M/181M [00:01&lt;02:17, 1.30MB/s]
-  1%|▍                                     | 1.80M/181M [00:01&lt;01:43, 1.72MB/s]
-  1%|▍                                     | 2.00M/181M [00:01&lt;02:00, 1.49MB/s]
-  1%|▌                                     | 2.46M/181M [00:01&lt;01:40, 1.78MB/s]
-  2%|▋                                     | 3.03M/181M [00:02&lt;01:09, 2.55MB/s]
-  2%|▊                                     | 3.78M/181M [00:02&lt;00:48, 3.62MB/s]
-  2%|▉                                     | 4.31M/181M [00:02&lt;00:53, 3.32MB/s]
-  3%|█▏                                    | 5.40M/181M [00:02&lt;00:35, 4.99MB/s]
-  3%|█▎                                    | 6.21M/181M [00:02&lt;00:30, 5.72MB/s]
-  4%|█▌                                    | 7.61M/181M [00:02&lt;00:22, 7.83MB/s]
-  5%|█▉                                    | 9.04M/181M [00:02&lt;00:18, 9.55MB/s]
-  6%|██▍                                   | 11.7M/181M [00:02&lt;00:11, 14.1MB/s]
-  8%|██▉                                   | 13.9M/181M [00:02&lt;00:10, 16.6MB/s]
-  9%|███▍                                  | 16.1M/181M [00:03&lt;00:09, 18.1MB/s]
- 11%|████▎                                 | 20.5M/181M [00:03&lt;00:06, 25.7MB/s]
- 13%|█████                                 | 24.2M/181M [00:03&lt;00:05, 28.8MB/s]
- 15%|█████▋                                | 27.1M/181M [00:03&lt;00:05, 29.0MB/s]
- 17%|██████▌                               | 31.1M/181M [00:03&lt;00:04, 32.3MB/s]
- 19%|███████▎                              | 35.0M/181M [00:03&lt;00:04, 34.1MB/s]
- 22%|████████▏                             | 39.1M/181M [00:03&lt;00:03, 36.2MB/s]
- 24%|█████████                             | 43.2M/181M [00:03&lt;00:03, 37.6MB/s]
- 26%|█████████▉                            | 47.2M/181M [00:03&lt;00:03, 38.3MB/s]
- 28%|██████████▋                           | 51.2M/181M [00:03&lt;00:03, 38.9MB/s]
- 30%|███████████▌                          | 55.2M/181M [00:04&lt;00:03, 39.1MB/s]
- 33%|████████████▍                         | 59.1M/181M [00:04&lt;00:03, 39.0MB/s]
- 35%|█████████████▏                        | 63.0M/181M [00:04&lt;00:03, 39.0MB/s]
- 37%|██████████████                        | 66.9M/181M [00:04&lt;00:02, 38.9MB/s]
- 39%|██████████████▉                       | 70.9M/181M [00:04&lt;00:02, 39.2MB/s]
- 41%|███████████████▋                      | 74.9M/181M [00:04&lt;00:02, 39.1MB/s]
- 43%|████████████████▌                     | 78.8M/181M [00:04&lt;00:02, 38.8MB/s]
- 46%|█████████████████▎                    | 82.8M/181M [00:04&lt;00:02, 39.2MB/s]
- 48%|██████████████████▏                   | 86.8M/181M [00:04&lt;00:02, 39.5MB/s]
- 50%|███████████████████                   | 90.8M/181M [00:04&lt;00:02, 39.1MB/s]
- 52%|███████████████████▊                  | 94.7M/181M [00:05&lt;00:02, 39.1MB/s]
- 54%|████████████████████▋                 | 98.6M/181M [00:05&lt;00:02, 39.1MB/s]
- 57%|██████████████████████                 | 102M/181M [00:05&lt;00:02, 38.9MB/s]
- 59%|██████████████████████▉                | 107M/181M [00:05&lt;00:01, 39.3MB/s]
- 61%|███████████████████████▊               | 110M/181M [00:05&lt;00:01, 38.1MB/s]
- 63%|████████████████████████▋              | 114M/181M [00:05&lt;00:01, 38.6MB/s]
- 65%|█████████████████████████▌             | 118M/181M [00:05&lt;00:01, 39.0MB/s]
- 68%|██████████████████████████▎            | 122M/181M [00:05&lt;00:01, 38.9MB/s]
- 70%|███████████████████████████▏           | 126M/181M [00:05&lt;00:01, 38.3MB/s]
- 72%|████████████████████████████           | 130M/181M [00:06&lt;00:01, 39.1MB/s]
- 74%|████████████████████████████▉          | 134M/181M [00:06&lt;00:01, 39.2MB/s]
- 76%|█████████████████████████████▊         | 138M/181M [00:06&lt;00:01, 39.0MB/s]
- 78%|██████████████████████████████▌        | 142M/181M [00:06&lt;00:01, 38.9MB/s]
- 81%|███████████████████████████████▍       | 146M/181M [00:06&lt;00:00, 39.3MB/s]
- 83%|████████████████████████████████▎      | 150M/181M [00:06&lt;00:00, 39.6MB/s]
- 85%|█████████████████████████████████▏     | 154M/181M [00:06&lt;00:00, 39.7MB/s]
- 87%|██████████████████████████████████     | 158M/181M [00:06&lt;00:00, 39.6MB/s]
- 90%|██████████████████████████████████▉    | 162M/181M [00:06&lt;00:00, 39.7MB/s]
- 92%|███████████████████████████████████▊   | 166M/181M [00:06&lt;00:00, 39.6MB/s]
- 94%|████████████████████████████████████▋  | 170M/181M [00:07&lt;00:00, 38.9MB/s]
- 96%|█████████████████████████████████████▍ | 174M/181M [00:07&lt;00:00, 38.5MB/s]
- 98%|██████████████████████████████████████▎| 178M/181M [00:07&lt;00:00, 39.1MB/s]
-  0%|                                               | 0.00/181M [00:00&lt;?, ?B/s]
-100%|████████████████████████████████████████| 181M/181M [00:00&lt;00:00, 889GB/s]
-</pre></div>
-</div>
 <p>Here, with the ElSel+Cov+TS+LDA pipeline, we reduce the computation time
 in approximately 8 times to the Cov+ElSel+TS+LDA pipeline.</p>
 <div class="highlight-Python notranslate"><div class="highlight"><pre><span></span><span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Averaging the session performance:&quot;</span><span class="p">)</span>
@@ -876,8 +809,7 @@ Xdawn+Cov+TS+LDA  0.658810  0.157087
 <li><p>Electrode selection strategy based on covariance matrices demonstrates less variability and typically yields better performance.</p></li>
 <li><p>However, this strategy is more time-consuming compared to the simpler electrode selection based on time epoch data.</p></li>
 </ul>
-<p class="sphx-glr-timing"><strong>Total running time of the script:</strong> (1 minutes 3.001 seconds)</p>
-<p><strong>Estimated memory usage:</strong>  839 MB</p>
+<p class="sphx-glr-timing"><strong>Total running time of the script:</strong> (0 minutes 0.215 seconds)</p>
 <div class="sphx-glr-footer sphx-glr-footer-example docutils container" id="sphx-glr-download-auto-examples-advanced-examples-plot-hinss2021-classification-py">
 <div class="sphx-glr-download sphx-glr-download-jupyter docutils container">
 <p><a class="reference download internal" download="" href="../../_downloads/5abf5216139378fc86b18e340a1f77b5/plot_hinss2021_classification.ipynb"><code class="xref download docutils literal notranslate"><span class="pre">Download</span> <span class="pre">Jupyter</span> <span class="pre">notebook:</span> <span class="pre">plot_hinss2021_classification.ipynb</span></code></a></p>

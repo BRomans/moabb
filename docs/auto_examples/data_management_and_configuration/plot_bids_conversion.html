@@ -730,24 +730,24 @@ standard and can vary from one dataset to another.</p>
 </div>
 <div class="sphx-glr-script-out highlight-none notranslate"><div class="highlight"><pre><span></span>After conversion:
 └──MNE-BIDS-alexandre-motor-imagery
-   ├──participants.json
-   ├──README
-   ├──participants.tsv
-   ├──code
-   │  ├──sub-1_ses-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_lockfile.json
-   │  └──AlexMI.metadata.yaml
-   ├──.bidsignore
    ├──sub-1
    │  └──ses-0
+   │     ├──sub-1_ses-0_scans.json
    │     ├──sub-1_ses-0_scans.tsv
-   │     ├──eeg
-   │     │  ├──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_events.json
-   │     │  ├──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_eeg.json
-   │     │  ├──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_channels.tsv
-   │     │  ├──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_eeg.edf
-   │     │  ├──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_events.tsv
-   │     │  └──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_channels.json
-   │     └──sub-1_ses-0_scans.json
+   │     └──eeg
+   │        ├──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_channels.json
+   │        ├──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_events.json
+   │        ├──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_events.tsv
+   │        ├──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_channels.tsv
+   │        ├──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_eeg.json
+   │        └──sub-1_ses-0_task-imagery_run-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_eeg.edf
+   ├──.bidsignore
+   ├──README
+   ├──participants.json
+   ├──participants.tsv
+   ├──code
+   │  ├──AlexMI.metadata.yaml
+   │  └──sub-1_ses-0_desc-ee95e5bcd4d74216f233f1a8b1bd1c85_lockfile.json
    └──dataset_description.json
 </pre></div>
 </div>
@@ -798,8 +798,7 @@ Université de Grenoble).
 <a class="reference external" href="https://tel.archives-ouvertes.fr/tel-01196752">https://tel.archives-ouvertes.fr/tel-01196752</a></p>
 </aside>
 </aside>
-<p class="sphx-glr-timing"><strong>Total running time of the script:</strong> (0 minutes 1.635 seconds)</p>
-<p><strong>Estimated memory usage:</strong>  401 MB</p>
+<p class="sphx-glr-timing"><strong>Total running time of the script:</strong> (0 minutes 0.302 seconds)</p>
 <div class="sphx-glr-footer sphx-glr-footer-example docutils container" id="sphx-glr-download-auto-examples-data-management-and-configuration-plot-bids-conversion-py">
 <div class="sphx-glr-download sphx-glr-download-jupyter docutils container">
 <p><a class="reference download internal" download="" href="../../_downloads/c3ebeb9988635652b155b2686d2f88b7/plot_bids_conversion.ipynb"><code class="xref download docutils literal notranslate"><span class="pre">Download</span> <span class="pre">Jupyter</span> <span class="pre">notebook:</span> <span class="pre">plot_bids_conversion.ipynb</span></code></a></p>
