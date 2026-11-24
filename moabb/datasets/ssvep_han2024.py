@@ -4,6 +4,7 @@ Han et al. (2024), IEEE TNSRE.
 DOI: 10.1109/TNSRE.2024.3380635
 """
 
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -38,6 +39,21 @@ _CONDITIONS = [
     ("high_frequency_train_data", "high", "train"),
     ("high_frequency_fatigue_data", "high", "fatigue"),
 ]
+
+# The fatigue MAT blocks do not store trials in the documented target order:
+# per-trial SSVEP scoring against the axis-order labels sits at the 1/16
+# chance level while the training-session labels verify well, and the
+# per-block order appears randomised (see issue #1184 for the analysis).
+# Until the dataset authors publish the authoritative per-trial target
+# sequences, session '1' labels must not be treated as ground truth.
+_FATIGUE_LABELS_NOTICE = (
+    "Han2024Fatigue session '1' (fatigue): the fatigue blocks do not store "
+    "trials in the documented target order, so the labels assigned by this "
+    "loader are unreliable for this session (single-trial SSVEP scoring sits "
+    "at chance level; see issue #1184). Use session '0' for labelled "
+    "analyses until the dataset authors publish the authoritative "
+    "per-trial target sequences."
+)
 
 # fmt: off
 # Low-frequency events (16): 8.0-15.5 Hz, 0.5 Hz step
@@ -90,6 +106,19 @@ class Han2024Fatigue(BaseDataset):
        problem that standard CCA/TRCA may not handle well without
        fatigue-aware strategies.
 
+       .. warning::
+
+          **Fatigue-session (session ``'1'``) labels are currently
+          unreliable.** The fatigue MAT blocks do not store trials in the
+          documented target order: single-trial SSVEP scoring against the
+          loader-assigned labels sits at the 1/16 chance level (while the
+          training-session labels verify at ~0.70-0.87 accuracy), and the
+          per-block trial order appears randomised (`issue #1184
+          <https://github.com/NeuroTechX/moabb/issues/1184>`_). Loading this
+          dataset emits a :exc:`UserWarning` for the fatigue session; use
+          session ``'0'`` for labelled analyses until the dataset authors
+          publish the authoritative per-trial target sequences.
+
     Data is stored as [16, 64, 3000, N_blocks] matrices (targets, channels,
     timepoints, blocks) in per-subject zip files on Zenodo. Each subject has
     4 separate files: low_frequency_train, low_frequency_fatigue,
@@ -128,6 +157,40 @@ class Han2024Fatigue(BaseDataset):
             age_max=26,
         ),
         experiment=ExperimentMetadata(
+            class_labels=[
+                "8",
+                "8.5",
+                "9",
+                "9.5",
+                "10",
+                "10.5",
+                "11",
+                "11.5",
+                "12",
+                "12.5",
+                "13",
+                "13.5",
+                "14",
+                "14.5",
+                "15",
+                "15.5",
+                "25.5",
+                "26",
+                "26.5",
+                "27",
+                "27.5",
+                "28",
+                "28.5",
+                "29",
+                "29.5",
+                "30",
+                "30.5",
+                "31",
+                "31.5",
+                "32",
+                "32.5",
+                "33",
+            ],
             paradigm="ssvep",
             events=dict(_EVENTS),
             n_classes=32,
@@ -140,6 +203,7 @@ class Han2024Fatigue(BaseDataset):
             has_training_test_split=True,
             task_type="gaze-shifting",
             feedback_type="none",
+            stimulus_presentation={"SoftwareName": "Psychophysics Toolbox (MATLAB)"},
         ),
         documentation=DocumentationMetadata(
             doi="10.1109/TNSRE.2024.3380635",
@@ -163,9 +227,12 @@ class Han2024Fatigue(BaseDataset):
                 "National Key Research and Development Program of China (Grant 2021YFF1200603)",
                 "National Natural Science Foundation of China (Grants 62276184, 61806141)",
             ],
+            contact_info=["clarenceke@tju.edu.cn", "richardming@tju.edu.cn"],
             keywords=["SSVEP", "BCI", "fatigue", "dynamic stopping", "EEG"],
         ),
-        preprocessing=PreprocessingMetadata(data_state="epoched"),
+        preprocessing=PreprocessingMetadata(
+            data_state="epoched", notch_hz=50.0, epoch_window=[-0.5, 2.5]
+        ),
         paradigm_specific=ParadigmSpecificMetadata(
             detected_paradigm="ssvep",
             stimulus_frequencies_hz=(
@@ -174,8 +241,8 @@ class Han2024Fatigue(BaseDataset):
             frequency_resolution_hz=0.5,
         ),
         data_structure=DataStructureMetadata(
-            n_blocks=60,
-            n_trials="960 per frequency band (16 targets x 60 blocks)",
+            n_blocks=30,
+            n_trials="960 total per subject (480 per frequency band: 16 targets x 30 blocks per frequency condition)",
             trials_context="6 training + 24 fatigue blocks per frequency condition",
         ),
         signal_processing=SignalProcessingMetadata(
@@ -184,7 +251,11 @@ class Han2024Fatigue(BaseDataset):
             frequency_bands=None,
             spatial_filters=["TRCA"],
         ),
-        cross_validation=CrossValidationMetadata(evaluation_type=None),
+        cross_validation=CrossValidationMetadata(
+            cv_method="leave-one-block-out",
+            cv_folds=6,
+            evaluation_type=["within_subject", "cross_session"],
+        ),
         bci_application=BCIApplicationMetadata(environment="lab", online_feedback=False),
         tags=Tags(pathology=["healthy"], modality=["visual"], type=["perception"]),
         sessions_per_subject=2,
@@ -193,6 +264,7 @@ class Han2024Fatigue(BaseDataset):
 
     _events = _EVENTS
     nemar_id = "nm000124"
+    nemar_seed_cache = True
 
     def __init__(self, subjects=None, sessions=None):
         super().__init__(
@@ -214,7 +286,14 @@ class Han2024Fatigue(BaseDataset):
         Each file has shape [16, 64, 3000, N_blocks] = (targets, channels,
         timepoints, blocks). Training files have 6 blocks, fatigue files
         have 24 blocks.
+
+        For the fatigue files the first array axis does *not* index targets
+        in the documented order (see ``_FATIGUE_LABELS_NOTICE`` and issue
+        #1184); a :exc:`UserWarning` is emitted and the axis-order labels are
+        kept only so that the session remains loadable.
         """
+        warnings.warn(_FATIGUE_LABELS_NOTICE, stacklevel=2)
+
         n_targets = 16
         sfreq = 1000
 
@@ -247,7 +326,7 @@ class Han2024Fatigue(BaseDataset):
             all_data = np.concatenate(session_epochs[sess_name], axis=0)
             all_events = np.concatenate(session_events[sess_name])
             raw = build_raw_from_epochs(
-                all_data, TSINGHUA_64CH_NAMES, sfreq, all_events, "standard_1005"
+                all_data, TSINGHUA_64CH_NAMES, sfreq, all_events, "colin27_1005"
             )
             sessions[sess_name] = {"0": raw}
 

@@ -69,6 +69,14 @@ class Simoes2020(BaseDataset):
     - Training: 1600 epochs per session (8 objects x 10 runs x 20 blocks)
     - Testing: 400 x K epochs per session (K = runs_per_block, 3-10)
 
+    Each session "was divided in two parts: calibration and online phase.
+    Data from calibration and online phases were named in the dataset as
+    train and test data, respectively" [1]_; MOABB exposes these two phases
+    as the two runs of a session (``runs_per_session=2``), which is not the
+    paper's "run" (one flash of each of the 8 objects within a block).
+    "The reference electrode was placed at the right ear and the ground
+    electrode at AFz location" [1]_.
+
     References
     ----------
     .. [1] Simoes, M., Borra, D., Santamaria-Vazquez, E., et al.
@@ -79,12 +87,16 @@ class Simoes2020(BaseDataset):
     """
 
     nemar_id = "nm000210"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=250.0,
             channel_types={"eeg": 8},
-            montage="standard_1020",
+            montage="standard_1005",
             hardware="g.Nautilus (g.tec, wireless)",
+            sensor_type="active",
+            filters="bandpass 2-30 Hz, notch 50 Hz",
+            software="Vizard toolkit",
             reference="right ear",
             ground="AFz",
             sensors=list(_CH_NAMES),
@@ -119,16 +131,33 @@ class Simoes2020(BaseDataset):
             mode="online",
         ),
         documentation=DocumentationMetadata(
+            senior_author="Miguel Castelo-Branco",
+            ethics_approval=["CEIC - Comissão de Ética para a Investigação Clínica"],
+            funding=[
+                "Fundação para a Ciência e Tecnologia (FCT) PAC-286 MEDPERSYST, POCI-01-0145-FEDER-016428",
+                "BIGDATIMAGE, CENTRO-01-0145-FEDER-000016",
+                "FCT UID/4950/2020",
+                "FCT PTDC/PSI-GER/30852/2017",
+                "MHRD Doctoral Student Scholarship (Government of India)",
+                "SPARC Grant P1073",
+            ],
+            repository="Zenodo",
             doi=_DOI,
             investigators=[
                 "Marco Simoes",
                 "Davide Borra",
                 "Eduardo Santamaria-Vazquez",
+                "GBT-UPM",
                 "Mayra Bittencourt-Villalpando",
                 "Dominik Krzeminski",
                 "Aleksandar Miladinovic",
+                "Neural_Engineering_Group",
+                "Thomas Schmid",
+                "Haifeng Zhao",
                 "Carlos Amaral",
                 "Bruno Direito",
+                "Jorge Henriques",
+                "Paulo Carvalho",
                 "Miguel Castelo-Branco",
             ],
             institution="University of Coimbra",
@@ -140,7 +169,9 @@ class Simoes2020(BaseDataset):
         sessions_per_subject=7,
         runs_per_session=2,
         tags=Tags(pathology=["Autism"], modality=["ERP"], type=["P300"]),
-        paradigm_specific=ParadigmSpecificMetadata(detected_paradigm="p300"),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="p300", soa_ms=300.0, isi_ms=200.0
+        ),
         data_structure=DataStructureMetadata(
             n_trials="1600 train + 400*K test per session (K=3-10)",
             trials_context="per_session",
@@ -280,7 +311,7 @@ class Simoes2020(BaseDataset):
         ch_types = ["eeg"] * n_ch + ["stim"]
         info = mne.create_info(ch_names, sfreq, ch_types)
         raw = mne.io.RawArray(all_data, info, verbose=False)
-        raw.set_montage("standard_1020", on_missing="warn")
+        raw.set_montage("colin27_1020", on_missing="warn")
 
         return raw
 

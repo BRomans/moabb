@@ -120,7 +120,10 @@ class Kaya2018(BaseDataset):
 
     Each trial consists of a 1-second visual cue followed by a 1.5-2.5
     second inter-trial interval. Subjects have between 1 and 3 recording
-    sessions (CLA files) each.
+    sessions (CLA files) each: subjects 1 (A) and 4 (D) have one session,
+    subjects 2 (B), 3 (C), 5 (E), 6 (F) and 7 (J) have three. Each CLA file
+    is returned as one session with a single run, so ``sessions_per_subject``
+    declares the maximum (3).
 
     .. note::
 
@@ -145,6 +148,7 @@ class Kaya2018(BaseDataset):
     """
 
     nemar_id = "nm000137"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=200.0,
@@ -152,6 +156,11 @@ class Kaya2018(BaseDataset):
             sensors=_EEG_CH_NAMES,
             montage="standard_1020",
             hardware="Nihon Kohden EEG-1200",
+            cap_manufacturer="Electro-Cap International",
+            electrode_type="bridge electrodes",
+            software="Neurofax, Matlab",
+            impedance_threshold_kohm=10.0,
+            filters={"highpass_hz": 0.53, "lowpass_hz": 70.0, "notch_hz": 50.0},
             reference="System 0V (0.55*(C3+C4))",
             ground="A1, A2 (earlobes)",
             line_freq=50.0,
@@ -169,7 +178,7 @@ class Kaya2018(BaseDataset):
             n_classes=3,
             class_labels=["left_hand", "right_hand", "passive"],
             trial_duration=1.0,
-            stimulus_type="visual arrow cue",
+            stimulus_type="red rectangle around motor imagery icon",
             stimulus_modalities=["visual"],
             primary_modality="visual",
             synchronicity="synchronous",
@@ -179,7 +188,13 @@ class Kaya2018(BaseDataset):
             feedback_type="none",
         ),
         documentation=DocumentationMetadata(
+            funding=["TUBITAK ARDEB grant number 113E611", "Science Academy BAGEP Award"],
+            ethics_approval=[
+                "Ethics Committees of Toros University and Mersin University, Turkey"
+            ],
             doi="10.1038/sdata.2018.211",
+            associated_paper_doi="10.1038/sdata.2018.211",
+            related_paper_dois=["10.1109/TBME.2018.2865941"],
             investigators=[
                 "Murat Kaya",
                 "Mustafa Kemal Binli",
@@ -188,6 +203,7 @@ class Kaya2018(BaseDataset):
                 "Yuriy Mishchenko",
             ],
             senior_author="Yuriy Mishchenko",
+            contact_info=["yuriy.mishchenko@gmail.com"],
             institution="Mersin University",
             country="TR",
             repository="Figshare",
@@ -203,7 +219,8 @@ class Kaya2018(BaseDataset):
             cue_duration_s=1.0,
         ),
         data_structure=DataStructureMetadata(
-            trials_context="Variable number of trials per session; 1s cue + 1.5-2.5s ITI"
+            n_blocks=3,
+            trials_context="Variable number of trials per session; 1s cue + 1.5-2.5s ITI",
         ),
         signal_processing=SignalProcessingMetadata(
             classifiers=["SVM"],
@@ -216,8 +233,13 @@ class Kaya2018(BaseDataset):
             cv_folds=5,
             evaluation_type=["within_subject"],
         ),
+        performance={"accuracy_percent": 75.0, "accuracy_std_percent": 10.0},
         bci_application=BCIApplicationMetadata(environment="lab", online_feedback=False),
         tags=Tags(pathology=["healthy"], modality=["motor"], type=["imagery"]),
+        contributing_labs=["Mersin University", "Izmir University of Economics"],
+        n_contributing_labs=2,
+        sessions_per_subject=3,
+        runs_per_session=1,
         file_format="MAT",
     )
 
@@ -226,7 +248,7 @@ class Kaya2018(BaseDataset):
     def __init__(self, subjects=None, sessions=None, *, return_all_modalities=False):
         super().__init__(
             subjects=list(range(1, 8)),
-            sessions_per_subject=1,
+            sessions_per_subject=3,
             events=self._events,
             code="Kaya2018",
             interval=[0, 1],
@@ -270,7 +292,7 @@ class Kaya2018(BaseDataset):
             raw = mne.io.RawArray(eeg_data, info, verbose=False)
 
             # Set standard 10-20 montage
-            montage = mne.channels.make_standard_montage("standard_1020")
+            montage = mne.channels.make_standard_montage("colin27_1020")
             raw.set_montage(montage, on_missing="warn", verbose=False)
 
             # Extract event onsets from marker channel transitions

@@ -15,6 +15,7 @@ from . import download as dl
 from .base import BaseDataset
 from .metadata.schema import (
     AcquisitionMetadata,
+    AuxiliaryChannelsMetadata,
     BCIApplicationMetadata,
     CrossValidationMetadata,
     DatasetMetadata,
@@ -53,9 +54,9 @@ _AGES = [
     39, 53, 64, 50, 55, 55, 41,
 ]
 _SEXES = [
-    "M", "M", "M", "M", "M", "M", "M", "M", "M", "M",
-    "M", "M", "F", "M", "F", "F", "M", "M", "M", "M",
-    "M", "M", "F", "M", "M", "M", "M",
+    "male", "male", "male", "male", "male", "male", "male", "male", "male", "male",
+    "male", "male", "female", "male", "female", "female", "male", "male", "male", "male",
+    "male", "male", "female", "male", "male", "male", "male",
 ]
 # fmt: on
 
@@ -91,6 +92,14 @@ class Liu2025(BaseDataset):
         Which sessions to load. One or more of ``"pre"``, ``"mises"``,
         ``"miies"``, ``"post"``, ``"follow"``. Default: ``"pre"`` only.
 
+    The authors' BIDS sidecar gives ``"EEGGround": "AFz"`` and
+    ``"EEGReference": "average"``, but it describes their 250 Hz preprocessed
+    release, which the paper re-references to the common average. The Zenodo
+    re-host of the 1000 Hz raw files repeats "Common average", while the
+    authors' ``electrodes.tsv`` lists CPz last, after the 59 standard sites,
+    which is how an online CPz reference looks once restored. The raw files'
+    reference is therefore left unset.
+
     References
     ----------
     .. [1] Liu, Y., Gui, Z., Yan, D., Wang, Z., Gao, R., Han, N.,
@@ -104,23 +113,34 @@ class Liu2025(BaseDataset):
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=1000.0,
-            channel_types={"eeg": 60, "ecg": 1, "eog": 4},
+            channel_types={"eeg": 59, "ecg": 1, "eog": 4},
             montage="standard_1020",
             hardware="NeuSen W (Neuracle, Inc.)",
+            reference=None,
+            ground="AFz",
             sensor_type="Ag/AgCl",
+            impedance_threshold_kohm=10.0,
             filters={"notch": 50.0},
             line_freq=50.0,
+            auxiliary_channels=AuxiliaryChannelsMetadata(
+                has_eog=True,
+                eog_channels=4,
+                eog_type=["horizontal", "vertical"],
+                other_physiological=["ecg"],
+            ),
         ),
         participants=ParticipantMetadata(
             n_subjects=27,
             health_status="stroke (recovery phase)",
             gender={"male": 23, "female": 4},
+            age_mean=51.44,
+            age_std=9.31,
             age_min=33.0,
             age_max=68.0,
             ages=_AGES,
             sexes=_SEXES,
             handedness="mixed",
-            species="human",
+            species="homo sapiens",
             clinical_population="stroke",
         ),
         experiment=ExperimentMetadata(
@@ -142,6 +162,22 @@ class Liu2025(BaseDataset):
             mode="offline",
         ),
         documentation=DocumentationMetadata(
+            senior_author="Dong Ming",
+            ethics_approval=[
+                "Ethics Committee of Tianjin Huanhu Hospital (IEC-B-013-V3.0)"
+            ],
+            funding=[
+                "National Key R&D Program of China (2023YFC3603800, 2023YFC3603802)",
+                "National Natural Science Foundation of China (62273251)",
+                "Research Project of State Key Laboratory of Mechanical System and Vibration (MSV202418)",
+                "Tianjin Science and Technology Plan Project (21JCYBJC00420, 21JCYBJC00520)",
+            ],
+            contact_info=[
+                "ryanliu@tju.edu.cn",
+                "wywjl2009@hotmail.com",
+                "richardming@tju.edu.cn",
+            ],
+            repository="Zenodo",
             doi=_DOI,
             investigators=[
                 "Yuan Liu",
@@ -155,25 +191,37 @@ class Liu2025(BaseDataset):
                 "Dong Ming",
             ],
             institution="Tianjin University",
+            institution_department="Academy of Medical Engineering and Translational Medicine",
             country="CN",
             data_url=f"https://zenodo.org/records/{_ZENODO_RECORD}",
             publication_year=2025,
             license="CC-BY-NC-ND-4.0",
         ),
-        sessions_per_subject=3,
+        sessions_per_subject=1,
         runs_per_session=4,
         tags=Tags(pathology=["Stroke"], modality=["Motor"], type=["Research"]),
         paradigm_specific=ParadigmSpecificMetadata(
             detected_paradigm="imagery",
             imagery_tasks=list(_EVENTS.keys()),
+            cue_duration_s=1.0,
             imagery_duration_s=5.0,
         ),
+        performance={
+            "accuracy_percent": 80.50,
+            "Pre_accuracy": 78.92,
+            "IES_accuracy": 80.57,
+            "SES_accuracy": 82.41,
+            "Post_accuracy": 80.95,
+            "Follow_accuracy": 80.52,
+        },
         data_structure=DataStructureMetadata(
-            n_trials=8640,
+            n_trials=80,
             trials_context=(
-                "27 subjects x 3 default sessions (pre/post/follow) x "
-                "~4 runs x ~20 trials = ~6480. Paradigm group subjects "
-                "have 2 extra sessions (mises/miies)."
+                "per session: 40 gait-MI + 40 idle trials (paper). The loader "
+                "default exposes the 'pre' session only; up to 5 sessions "
+                "(pre/mises/miies/post/follow) exist for the paradigm group and "
+                "3 (pre/post/follow) for the longitudinal group. The paper reports "
+                "4,260 lower-limb MI trials in total."
             ),
         ),
         signal_processing=SignalProcessingMetadata(
@@ -265,6 +313,13 @@ class Liu2025(BaseDataset):
                     raw = mne.io.read_raw_brainvision(
                         str(vhdr), preload=True, verbose="ERROR"
                     )
+                    ch_type_map = {
+                        ch: ("ecg" if ch.upper() == "ECG" else "eog")
+                        for ch in raw.ch_names
+                        if ch.upper() in ("ECG", "HEOR", "HEOL", "VEOU", "VEOL")
+                    }
+                    if ch_type_map:
+                        raw.set_channel_types(ch_type_map, verbose=False)
 
                     # Map BrainVision stimulus annotations to event names.
                     # BV format: "Stimulus/S  3" -> "gait_imagery"
@@ -307,6 +362,9 @@ class Liu2025(BaseDataset):
         subj_dir = data_dir / f"sub-{subject:02d}"
 
         if subj_dir.exists() and list(subj_dir.rglob("*.vhdr")) and not force_update:
+            return str(data_dir)
+
+        if not force_update and dl.fill_tree_from_store(data_dir, subj_dir.name):
             return str(data_dir)
 
         # Download per-subject ZIP from Zenodo and extract.

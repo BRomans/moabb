@@ -16,11 +16,18 @@ import mne
 import numpy as np
 import pandas as pd
 import tqdm
-from mne_bids import BIDSPath, read_raw_bids
 
 from moabb.datasets import download as dl
 from moabb.datasets.base import BaseDataset
-from moabb.utils import _handle_deprecated_kwargs
+from moabb.datasets.metadata.schema import (
+    AcquisitionMetadata,
+    AuxiliaryChannelsMetadata,
+    DatasetMetadata,
+    DocumentationMetadata,
+    ExperimentMetadata,
+    ParticipantMetadata,
+)
+from moabb.utils import _handle_deprecated_kwargs, get_download_provider
 
 
 OSF_BASE_URL = "https://files.osf.io/v1/resources/"
@@ -35,6 +42,13 @@ _manifest_link = (
 # ERP CORE is one BIDS dataset where the component is the ``task-`` entity;
 # every class shares this root and selects its files by task.
 DATASET_FOLDER = "MNE-erpcore2021-data"
+
+# NEMAR's nm000132 holds the same recordings as one raw BIDS dataset (no
+# sourcedata/): the ERN and LRP classes read its shared ``task-flankers`` files.
+_NEMAR_TASK = {"ERN": "flankers", "LRP": "flankers"}
+# Files read_raw_bids needs next to the recording, per task.
+_BIDS_RECORDING_SUFFIXES = ("eeg.set", "eeg.fdt", "events.tsv", "channels.tsv")
+_NEMAR_SUBJECT_SIDECARS = ["electrodes", "coordsystem"]
 
 # The original distribution shipped one standalone BIDS dataset per component.
 # Kept only to read pre-existing downloads in that layout without re-fetching.
@@ -91,7 +105,7 @@ _docstring_tail = """
 
 
 class ErpCore2021(BaseDataset):
-    __doc__ = f"""Abstract base dataset class the ERP CORE dataset by Kappenman et al. 2020.
+    __doc__ = f"""Abstract base dataset class the ERP CORE dataset by Kappenman et al. 2021.
     {_docstring_head}
     **Experimental procedures**:
     - **N170**: Subjects viewed faces and objects to elicit the N170 component. In this task,
@@ -121,6 +135,122 @@ class ErpCore2021(BaseDataset):
     {_docstring_tail}
     """
 
+    METADATA = DatasetMetadata(
+        acquisition=AcquisitionMetadata(
+            sampling_rate=1024.0,
+            channel_types={"eeg": 30, "eog": 3},
+            montage="standard_1020",
+            hardware="Biosemi ActiveTwo",
+            sensor_type="active Ag/AgCl",
+            reference="CMS/DRL (PO1/PO2); single-ended recording",
+            ground="CMS/DRL (PO1/PO2)",
+            software="Presentation (Neurobehavioral Systems)",
+            filters="fifth-order sinc low-pass filter, half-power cutoff at 204.8 Hz",
+            line_freq=60.0,
+            sensors=[
+                "FP1",
+                "F3",
+                "F7",
+                "FC3",
+                "C3",
+                "C5",
+                "P3",
+                "P7",
+                "P9",
+                "PO7",
+                "PO3",
+                "O1",
+                "Oz",
+                "Pz",
+                "CPz",
+                "FP2",
+                "Fz",
+                "F4",
+                "F8",
+                "FC4",
+                "FCz",
+                "Cz",
+                "C4",
+                "C6",
+                "P4",
+                "P8",
+                "P10",
+                "PO8",
+                "PO4",
+                "O2",
+                "HEOG_left",
+                "HEOG_right",
+                "VEOG_lower",
+            ],
+            auxiliary_channels=AuxiliaryChannelsMetadata(
+                has_eog=True, eog_channels=3, eog_type=["horizontal", "vertical"]
+            ),
+        ),
+        participants=ParticipantMetadata(
+            n_subjects=40,
+            health_status="healthy",
+            gender={"female": 25, "male": 15},
+            age_mean=21.5,
+            age_std=2.87,
+            age_min=18,
+            age_max=30,
+            handedness={"right": 38, "left": 2},
+            species="homo sapiens",
+        ),
+        experiment=ExperimentMetadata(
+            paradigm="p300",
+            n_classes=2,
+            class_labels=["Target", "NonTarget"],
+            events={"Target": 1, "NonTarget": 2},
+            trial_duration=1.0,
+        ),
+        documentation=DocumentationMetadata(
+            doi="10.1016/j.neuroimage.2020.117465",
+            associated_paper_doi="10.1016/j.neuroimage.2020.117465",
+            data_url="https://doi.org/10.18115/D5JW4R",
+            investigators=[
+                "Emily S. Kappenman",
+                "Jaclyn L. Farrens",
+                "Wendy Zhang",
+                "Andrew X. Stewart",
+                "Steven J. Luck",
+            ],
+            senior_author="Steven J. Luck",
+            institution="San Diego State University; University of California, Davis",
+            institution_department="Department of Psychology",
+            institution_address="San Diego, CA, 92120, USA",
+            country="US",
+            contact_info=["emily.kappenman@sdsu.edu"],
+            ethics_approval=[
+                "Approved by the Institutional Review Board at the University of California, Davis"
+            ],
+            funding=["NIH R01MH087450", "NIH R25MH080794"],
+            acknowledgements=(
+                "We thank Mike Blank and David Woods at Neurobehavioral Systems, Inc. "
+                "for providing professional programming of the tasks in Presentation. "
+                "Programming, data analysis, and manuscript preparation were made possible "
+                "by NIH grants R01MH087450 and R25MH080794."
+            ),
+            how_to_acknowledge=(
+                "Please cite: Kappenman et al. (2021). ERP CORE: An open resource "
+                "for human event-related potential research. NeuroImage, 225, 117465. "
+                "https://doi.org/10.1016/j.neuroimage.2020.117465"
+            ),
+            keywords=[
+                "Event-related potentials",
+                "EEG",
+                "Data quality",
+                "Open science",
+                "Reproducibility",
+            ],
+            publication_year=2021,
+            repository="Osf",
+            license="CC-BY-4.0",
+        ),
+        sessions_per_subject=1,
+        runs_per_session=1,
+    )
+
     def __init__(
         self, task, subjects=None, sessions=None, *, return_all_modalities=False, **kwargs
     ):
@@ -144,10 +274,10 @@ class ErpCore2021(BaseDataset):
             interval = (-0.2, 0.8)
             events = {"Target": 1, "NonTarget": 2}
         elif task == "ERN":
-            interval = (-0.8, 0.2)
+            interval = (-0.6, 0.4)
             events = {"Target": 1, "NonTarget": 2}
         elif task == "LRP":
-            interval = (-0.6, 0.4)
+            interval = (-0.8, 0.2)
             events = {"Target": 1, "NonTarget": 2}
         else:
             raise ValueError(f"Unknown task {task}")
@@ -182,23 +312,25 @@ class ErpCore2021(BaseDataset):
         """
         # Get the file path for the subject's data
         file_path = self.data_path(subject)[0]
+        events_path = file_path.copy().update(suffix="events", extension=".tsv").fpath
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
             # Read the subject's raw data and set the montage
+            from mne_bids import read_raw_bids
+
             raw = read_raw_bids(bids_path=file_path, verbose=False)
             raw.load_data()  # Preload the data because read_raw_bids does not load it
-            raw = raw.set_montage("standard_1020", match_case=False)
+            raw = raw.set_montage("colin27_1020", match_case=False)
+
+        raw = self.handle_events_reading(events_path, raw)
 
         # Shift the stimulus event codes forward in time
         # to account for the LCD monitor delay
         # (26 ms on our monitor, as measured with a photosensor).
-        if self.task != "MMN":
+        if self.task in ("N170", "N2pc", "N400", "P3"):
             raw.annotations.onset = raw.annotations.onset + 0.026
-
-        events_path = self.events_path(subject)
-        raw = self.handle_events_reading(events_path, raw)
 
         # There is only one session
         sessions = {"0": {"0": raw}}
@@ -238,15 +370,16 @@ class ErpCore2021(BaseDataset):
         if subject not in self.subject_list:
             raise ValueError("Invalid subject number")
 
-        # Download and extract the dataset
-        dataset_path = self.download_by_subject(
-            subject=subject, path=path, force_update=force_update
+        dataset_path, task = self._subject_root(
+            subject, path=path, force_update=force_update, verbose=verbose
         )
 
         # Create a BIDSPath object for the subject
+        from mne_bids import BIDSPath
+
         bids_path = BIDSPath(
             subject=f"{subject:03d}",
-            task=self.task,
+            task=task,
             suffix="eeg",
             datatype="eeg",
             root=dataset_path,
@@ -255,6 +388,134 @@ class ErpCore2021(BaseDataset):
         subject_paths = [bids_path]
 
         return subject_paths
+
+    @property
+    def _nemar_task(self):
+        """The ``task-`` label of this component in the NEMAR deposit."""
+        return _NEMAR_TASK.get(self.task, self.task)
+
+    @staticmethod
+    def _has_recording(root, subject, task):
+        """Whether ``root`` holds the files one recording is read from."""
+        eeg_dir = Path(root) / f"sub-{subject:03d}" / "eeg"
+        stem = f"sub-{subject:03d}_task-{task}_"
+        return all(
+            (eeg_dir / (stem + suffix)).is_file() for suffix in _BIDS_RECORDING_SUFFIXES
+        )
+
+    def _nemar_root(self, path=None):
+        # One store for all seven classes: ERN and LRP read the same files.
+        root = Path(dl.get_dataset_path("ERPCORE2021", path))
+        return root / DATASET_FOLDER / self.nemar_id
+
+    def _upstream_root(self, subject, path=None):
+        """The local upstream copy holding this subject's recording, or None."""
+        root = Path(dl.get_dataset_path("ERPCORE2021", path)) / DATASET_FOLDER
+        legacy_root = root.parent / DATASET_PARAMS[self.task]["folder_name"]
+        for candidate in (root, legacy_root):
+            if self._has_recording(candidate, subject, self.task):
+                return candidate
+        return None
+
+    def _download_nemar(
+        self, subject, path=None, force_update=False, update_path=None, verbose=None
+    ):
+        """Fetch one subject's recording of this component from NEMAR.
+
+        The deposit is raw BIDS without ``sourcedata/``: select the subject's
+        files of this component's task, plus its task-independent
+        ``electrodes.tsv`` / ``coordsystem.json``, which a task filter alone
+        would drop.
+        """
+        label = self._nemar_subject(subject)
+        for filters in ({"task": self._nemar_task}, {"suffix": _NEMAR_SUBJECT_SIDECARS}):
+            root = dl.nemar_dl(
+                self.nemar_id,
+                "ERPCORE2021",
+                path=path,
+                force_update=force_update,
+                subject=label,
+                verbose=verbose,
+                **filters,
+            )
+        return root
+
+    def _prefetch_nemar_sourcedata(self, subjects, verbose=None):
+        # nm000132 has no sourcedata/: data_path reads its raw BIDS files.
+        return None
+
+    def download(
+        self,
+        subject_list=None,
+        path=None,
+        force_update=False,
+        update_path=None,
+        accept=False,
+        verbose=None,
+    ):
+        """Download the subjects' recordings of this component.
+
+        Unlike most mirrored datasets, the NEMAR deposit (``nm000132``) is the
+        raw BIDS dataset itself (no ``sourcedata/``), so this fetches the same
+        files :meth:`data_path` reads, with the provider policy described
+        there.
+        """
+        for subject in self.subject_list if subject_list is None else subject_list:
+            self.data_path(subject, path=path, force_update=force_update, verbose=verbose)
+
+    def _subject_root(self, subject, path=None, force_update=False, verbose=None):
+        """Return ``(bids_root, task)`` holding the subject's recording.
+
+        The NEMAR deposit ``nm000132`` is the ERP CORE BIDS dataset itself:
+        its EEGLAB files and events are the upstream OSF files (the ERN and
+        LRP components read its shared ``task-flankers`` recording), so it
+        serves loads unless the provider is ``"upstream"``. With ``"auto"``
+        a local upstream copy is reused without a download, and a NEMAR
+        failure falls back to OSF with a warning; ``"nemar"`` makes it fatal.
+        """
+        provider = get_download_provider()
+        if provider != "upstream":
+            nemar_root = self._nemar_root(path)
+            if not force_update and self._has_recording(
+                nemar_root, subject, self._nemar_task
+            ):
+                return nemar_root, self._nemar_task
+            upstream_root = self._upstream_root(subject, path)
+            if provider == "auto" and not force_update and upstream_root is not None:
+                return upstream_root, self.task
+            try:
+                root = self._download_nemar(
+                    subject, path=path, force_update=force_update, verbose=verbose
+                )
+            except dl.NemarDownloadError as exc:
+                if provider == "nemar":
+                    raise
+                warnings.warn(
+                    f"Could not fetch {self.code} subject {subject} from NEMAR "
+                    f"({self.nemar_id}); downloading it from OSF instead. "
+                    f"Original error: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            else:
+                if self._has_recording(root, subject, self._nemar_task):
+                    return Path(root), self._nemar_task
+                if provider == "nemar":
+                    raise dl.NemarDownloadError(
+                        f"NEMAR dataset {self.nemar_id} has no task-"
+                        f"{self._nemar_task} recording for subject {subject}."
+                    )
+                warnings.warn(
+                    f"NEMAR dataset {self.nemar_id} has no task-{self._nemar_task} "
+                    f"recording for {self.code} subject {subject}; downloading it "
+                    "from OSF instead.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        root = self.download_by_subject(
+            subject=subject, path=path, force_update=force_update
+        )
+        return Path(root), self.task
 
     def download_by_subject(self, subject, path=None, force_update=False):
         """
@@ -550,7 +811,6 @@ class ErpCore2021_N2pc(ErpCore2021):
             return "Stimulus - target pink, target right, gap at bottom"
 
     def encoding(self, events_df):
-
         # Drop rows corresponding to the responses
         events_df.drop(events_df[events_df["value"].isin([201, 202])].index, inplace=True)
 
@@ -652,7 +912,6 @@ class ErpCore2021_P3(ErpCore2021):
             return "Stimulus - block target D, trial stimulus E"
 
     def encoding(self, events_df):
-
         # Drop rows corresponding to the responses
         events_df.drop(events_df[events_df["value"].isin([201, 202])].index, inplace=True)
 
@@ -726,7 +985,6 @@ class ErpCore2021_N400(ErpCore2021):
             return "Stimulus - target word, unrelated word pair, list 2"
 
     def encoding(self, events_df):
-
         # Drop rows corresponding to the responses
         events_df.drop(
             events_df[events_df["value"].isin([111, 112, 121, 122, 201, 202])].index,
@@ -878,7 +1136,6 @@ class ErpCore2021_LRP(ErpCore2021):
             return "Response - right, incompatible flankers, target left"
 
     def encoding(self, events_df):
-
         # Check the first two rows if both are 'Response'
         if (
             events_df.iloc[0]["trial_type"] == "response"

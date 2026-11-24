@@ -11,9 +11,12 @@ Each study is exposed as a separate MOABB dataset class (e.g.,
 ``Mainsah2025_A``, ``Mainsah2025_B``, ..., ``Mainsah2025_S2``).
 """
 
+import hashlib
+import json
 import logging
 import re
 import warnings
+from dataclasses import replace
 from functools import partialmethod
 from pathlib import Path
 
@@ -43,6 +46,37 @@ _MANIFEST_URL = _BASE_URL + "SHA256SUMS.txt"
 _DOI = "10.13026/0byy-ry86"
 _SIGN = "Mainsah2025"
 
+# Sampling rate of every BigP3BCI recording (g.USBamp, BCI2000).
+_SFREQ = 256.0
+
+
+def _restore_nominal_rate(raw, edf_path):
+    """Return ``raw`` at exactly 256 Hz when its header rate is a rounding artefact.
+
+    Each EDF stores the whole run as one data record whose duration field has
+    eight characters, so the duration is truncated (35208 samples / 256 Hz =
+    137.53125 s is written ``137.5312``) and MNE derives rates such as
+    256.00009 Hz that differ from file to file. Epochs of runs with different
+    rates cannot be concatenated, so the samples are relabelled at 256 Hz
+    (no resampling). A header rate that is not explained by this truncation
+    (more than one sample of drift over the run) raises.
+    """
+    sfreq = raw.info["sfreq"]
+    if sfreq == _SFREQ:
+        return raw
+    drift = raw.n_times * abs(1.0 / _SFREQ - 1.0 / sfreq) * _SFREQ
+    if drift >= 1.0:
+        raise ValueError(
+            f"Mainsah2025 recording sampled at {sfreq} Hz, expected {_SFREQ:g} Hz "
+            f"(drift of {drift:.1f} samples over the run): {edf_path}"
+        )
+    info = mne.create_info(raw.ch_names, _SFREQ, raw.get_channel_types())
+    fixed = mne.io.RawArray(raw.get_data(), info, verbose=False)
+    fixed.set_meas_date(raw.info["meas_date"])
+    fixed.set_annotations(raw.annotations)
+    return fixed
+
+
 # Module-level manifest cache (parsed once, shared across instances)
 _manifest_cache = None
 
@@ -54,6 +88,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 32,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": None,
     },
     "B": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21],
@@ -61,6 +96,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 16,
         "grid": "6x6",
         "has_als": True,
+        "associated_paper_doi": "10.1088/1741-2560/12/4/046027",
     },
     "C": {
         "subjects": [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 20, 21, 22],
@@ -68,6 +104,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 32,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": "10.1109/TNSRE.2014.2374471",
     },
     "D": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
@@ -75,6 +112,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 32,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": "10.1109/TNSRE.2014.2321290",
     },
     "E": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8],
@@ -82,6 +120,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 16,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": "10.1109/TNSRE.2014.2321290",
     },
     "F": {
         "subjects": [3, 5, 6, 7, 8, 20, 21, 23, 24, 25],
@@ -89,6 +128,9 @@ _STUDY_CONFIGS = {
         "n_eeg": 16,
         "grid": "9x8",
         "has_als": True,
+        "associated_paper_doi": "10.1088/1741-2560/12/1/016013",
+        "reference": "right mastoid",
+        "ground": "left mastoid",
     },
     "G": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
@@ -96,6 +138,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 16,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": None,
     },
     "H": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
@@ -103,6 +146,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 16,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": "10.1088/1741-2552/aa776b",
     },
     "I": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
@@ -110,6 +154,9 @@ _STUDY_CONFIGS = {
         "n_eeg": 16,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": "10.1088/1741-2552/aa7525",
+        "reference": "right mastoid",
+        "ground": "left mastoid",
     },
     "J": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
@@ -117,6 +164,9 @@ _STUDY_CONFIGS = {
         "n_eeg": 16,
         "grid": "6x6",
         "has_als": False,
+        "associated_paper_doi": "10.1088/1741-2552/aa7525",
+        "reference": "right mastoid",
+        "ground": "left mastoid",
     },
     "K": {
         "subjects": [1, 2, 3, 4, 9],
@@ -124,6 +174,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 16,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": None,
     },
     "L": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
@@ -131,6 +182,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 16,
         "grid": "6x6",
         "has_als": True,
+        "associated_paper_doi": "10.1016/j.clinph.2010.05.016",
     },
     "M": {
         "subjects": [4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25],
@@ -138,6 +190,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 16,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": None,
     },
     "N": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8],
@@ -145,6 +198,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 16,
         "grid": "6x6",
         "has_als": True,
+        "associated_paper_doi": "10.1016/j.jneumeth.2012.01.008",
     },
     "O": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
@@ -152,6 +206,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 32,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": "10.3389/fnins.2012.00159",
     },
     "P": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
@@ -159,6 +214,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 32,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": "10.1088/1741-2560/9/2/026011",
     },
     "Q": {
         "subjects": list(range(1, 37)),
@@ -166,6 +222,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 32,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": "10.1088/1741-2560/11/3/036008",
     },
     "R": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
@@ -173,6 +230,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 32,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": "10.1109/TBME.2014.2369491",
     },
     "S1": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
@@ -180,6 +238,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 32,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": "10.3389/fnins.2015.00149",
     },
     "S2": {
         "subjects": [1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28],
@@ -187,6 +246,7 @@ _STUDY_CONFIGS = {
         "n_eeg": 32,
         "grid": "9x8",
         "has_als": False,
+        "associated_paper_doi": "10.3389/fnins.2015.00149",
     },
 }
 # fmt: on
@@ -206,11 +266,23 @@ _DOCUMENTATION = DocumentationMetadata(
         "Eric Sellers",
         "Leslie Collins",
     ],
+    senior_author="Leslie Collins",
     institution="Duke University; East Tennessee State University",
+    institution_department="Department of Electrical and Computer Engineering (Duke University); Department of Psychology (East Tennessee State University)",
     country="US",
     repository="PhysioNet",
     data_url="https://physionet.org/content/bigp3bci/1.0.0/",
     publication_year=2025,
+    ethics_approval=[
+        "Duke University Institutional Review Board",
+        "East Tennessee State University Institutional Review Board",
+    ],
+    funding=[
+        "National Institutes of Health (NIH) R01DC009834",
+        "National Institutes of Health (NIH) R21DC018156",
+        "Duke University Energy Initiative",
+    ],
+    keywords=["P300", "ERP", "BCI", "speller", "ALS", "EEG", "BCI2000"],
     license="CC-BY-4.0",
 )
 
@@ -275,7 +347,7 @@ class Mainsah2025(BaseDataset):
 
     Each study explores a different P300 speller paradigm variant
     (checkerboard, row-column, dynamic, adaptive, etc.) with either
-    a 6x6 or 9x8 character grid. Studies L through R include
+    a 6x6 or 9x8 character grid. Studies B, F, L, and N include
     participants with ALS.
 
     Each EDF+ file corresponds to one spelling block and contains:
@@ -290,6 +362,19 @@ class Mainsah2025(BaseDataset):
     Events are extracted from the ``StimulusBegin`` and ``StimulusType``
     signal channels.
 
+    Every recording is at 256 Hz, but each EDF stores the run as one data
+    record whose 8-character duration field is truncated, so the rate read
+    from the header is off by less than 1 ppm and differs from file to
+    file (e.g. 256.00008 and 256.00009 Hz). The loader relabels such runs at
+    exactly 256 Hz (no resampling), so epochs of all runs and subjects can be
+    concatenated.
+
+    The PhysioNet record names no reference or ground electrode. The study F
+    paper states "The left and right mastoids were used for ground and
+    reference electrodes, respectively", and the paper for studies I and J says
+    the same, so those three studies record a right mastoid reference and a
+    left mastoid ground; the other studies leave both unset.
+
     This base class is not intended to be instantiated directly.
     Use the study-specific subclasses (e.g., ``Mainsah2025_A``).
 
@@ -299,6 +384,10 @@ class Mainsah2025(BaseDataset):
        BigP3BCI: A large P300-based brain-computer interface dataset.
        PhysioNet, 2025. DOI: https://doi.org/10.13026/0byy-ry86
     """
+
+    # The file list comes from PhysioNet's SHA256SUMS.txt, so a deposit that
+    # lacks some EDFs only means those few are still fetched from PhysioNet.
+    nemar_seed_cache = True
 
     def __init__(self, study, subjects=None, sessions=None):
         config = _STUDY_CONFIGS[study]
@@ -317,13 +406,87 @@ class Mainsah2025(BaseDataset):
         )
 
     @staticmethod
+    def _manifest_from_store():
+        """File list from the active store's provenance, or None.
+
+        The deposit's ``sourcedata_provenance.json`` records every file with
+        its upstream name and SHA-256 (the same hash SHA256SUMS.txt lists),
+        so when the store holds the files there is no need to fetch the
+        PhysioNet index. Files whose bytes do not match their provenance
+        hash are left out, so they fall back to the upstream download.
+        """
+        store = dl.active_store()
+        if store is None:
+            return None
+        provenance = store / "sourcedata_provenance.json"
+        if not provenance.is_file():
+            return None
+        try:
+            record = json.loads(provenance.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        result = {}
+        for entry in record.get("files") or []:
+            if not isinstance(entry, dict):
+                continue
+            # Provenance entries name the file ``file`` (relative to
+            # sourcedata/, e.g. ``B_01/SE001/Test/CB/B_01_....edf``), not the
+            # full upstream ``bigP3BCI-data/Study...`` path.
+            raw_name = entry.get("name") or entry.get("file") or ""
+            name = raw_name
+            if name and not name.startswith("bigP3BCI-data/"):
+                # Rebuild the upstream relative path the manifest parser keys
+                # on: Study<study>/<subj>/SE<nnn>/<Test|Train>/.../<file>.edf
+                parts = name.split("/")
+                if len(parts) >= 4:
+                    subj = parts[0]
+                    study = subj.split("_")[0]
+                    name = f"bigP3BCI-data/Study{study}/" + name
+            if not name.endswith(".edf"):
+                continue
+            stored = store / raw_name
+            if not stored.is_file():
+                continue
+            expected = entry.get("sha256")
+            if expected:
+                digest = hashlib.sha256(stored.read_bytes()).hexdigest()
+                if digest != expected:
+                    continue
+            m = re.match(
+                r"bigP3BCI-data/Study([\w-]+)/([\w-]+)/SE(\d+)/"
+                r"(Test|Train)/(?:[\w-]+/)?(.+\.edf)",
+                name,
+            )
+            if not m:
+                continue
+            study, subj_str, session_str = m.group(1), m.group(2), m.group(3)
+            result.setdefault(study, {}).setdefault(subj_str, {}).setdefault(
+                int(session_str), []
+            ).append(name)
+        if not result:
+            return None
+        for study in result.values():
+            for subj in study.values():
+                for sess in subj:
+                    subj[sess].sort()
+        return result
+
+    @staticmethod
     def _get_manifest():
-        """Download and parse the SHA256SUMS manifest (cached in memory)."""
+        """Parse the SHA256SUMS manifest (cached in memory).
+
+        Taken from the active NEMAR store's provenance when it holds the
+        files; only otherwise is SHA256SUMS.txt fetched from PhysioNet.
+        """
         global _manifest_cache
         if _manifest_cache is None:
-            manifest_path = _get_manifest_path()
-            dl.download_if_missing(str(manifest_path), _MANIFEST_URL, warn_missing=False)
-            _manifest_cache = _parse_manifest(manifest_path)
+            _manifest_cache = Mainsah2025._manifest_from_store()
+            if _manifest_cache is None:
+                manifest_path = _get_manifest_path()
+                dl.download_if_missing(
+                    str(manifest_path), _MANIFEST_URL, warn_missing=False
+                )
+                _manifest_cache = _parse_manifest(manifest_path)
         return _manifest_cache
 
     def _subject_str(self, subject):
@@ -425,6 +588,7 @@ class Mainsah2025(BaseDataset):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
+        raw = _restore_nominal_rate(raw, edf_path)
 
         # Extract stimulus signals before dropping non-EEG channels
         required = {"StimulusBegin", "StimulusType"}
@@ -452,7 +616,7 @@ class Mainsah2025(BaseDataset):
         raw.rename_channels(rename)
 
         # Set montage (warn on missing channels rather than error)
-        raw.set_montage("standard_1020", on_missing="warn")
+        raw.set_montage("colin27_1020", on_missing="warn")
 
         # Add synthetic stim channel
         stim_info = mne.create_info(["STI"], raw.info["sfreq"], ["stim"])
@@ -467,9 +631,13 @@ def _make_study_metadata(study):
     config = _STUDY_CONFIGS[study]
     return DatasetMetadata(
         acquisition=AcquisitionMetadata(
-            sampling_rate=256.0,
+            sampling_rate=_SFREQ,
             channel_types={"eeg": config["n_eeg"]},
             hardware="g.USBamp (g.tec)",
+            reference=config.get("reference"),
+            ground=config.get("ground"),
+            software="BCI2000",
+            sensor_type="passive gel-based or active dry",
             montage="standard_1020",
             line_freq=60.0,
         ),
@@ -477,16 +645,35 @@ def _make_study_metadata(study):
             n_subjects=len(config["subjects"]),
             health_status="patients" if config["has_als"] else "healthy",
             clinical_population="ALS" if config["has_als"] else None,
+            age_min=18.0,
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             paradigm="p300",
             events={"Target": 2, "NonTarget": 1},
             n_classes=2,
             class_labels=["Target", "NonTarget"],
+            trial_duration=1.0,
+            task_type="p300_speller",
+            stimulus_type="character matrix flash",
+            stimulus_modalities=["visual"],
+            primary_modality="visual",
+            synchronicity="synchronous",
+            mode="both",
+            has_training_test_split=True,
         ),
-        documentation=_DOCUMENTATION,
+        documentation=replace(
+            _DOCUMENTATION,
+            related_paper_dois=(
+                [config["associated_paper_doi"]]
+                if config.get("associated_paper_doi")
+                else None
+            ),
+        ),
         sessions_per_subject=config["n_sessions"],
-        paradigm_specific=ParadigmSpecificMetadata(detected_paradigm="p300"),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="p300", n_targets=36 if config["grid"] == "6x6" else 72
+        ),
         signal_processing=SignalProcessingMetadata(
             classifiers=None,
             feature_extraction=["P300_ERP_detection"],
@@ -499,7 +686,13 @@ def _make_study_metadata(study):
         bci_application=BCIApplicationMetadata(
             applications=["speller"], environment="laboratory", online_feedback=True
         ),
-        tags=Tags(modality=["visual"], type=["perception"]),
+        tags=Tags(
+            pathology=["ALS"] if config["has_als"] else ["Healthy"],
+            modality=["visual"],
+            type=["perception"],
+        ),
+        file_format="EDF+",
+        data_processed=False,
     )
 
 
@@ -509,7 +702,11 @@ def _make_study_metadata(study):
 
 
 class Mainsah2025_A(Mainsah2025):
-    """BigP3BCI Study A — 6x6 checkerboard/row-column/random (13 healthy subjects)."""
+    """BigP3BCI Study A — 9x8 grid, row-column/checkerboard/random paradigms, 1 session.
+
+    PhysioNet Table 1: 13 participants, no target end users; related
+    publication: Throckmorton et al., 4th International BCI Meeting, 2010.
+    """
 
     nemar_id = "nm000269"
     __init__ = partialmethod(Mainsah2025.__init__, "A")
@@ -517,7 +714,15 @@ class Mainsah2025_A(Mainsah2025):
 
 
 class Mainsah2025_B(Mainsah2025):
-    """BigP3BCI Study B — 6x6 checkerboard, multi-session (19 healthy subjects)."""
+    """BigP3BCI Study B — 6x6 checkerboard, multi-session, ALS end users.
+
+    PhysioNet Table 1: 18 participants, "Has Target End User? Yes", number of
+    sessions "Var" (variable); the loader exposes 19 subject IDs and declares 8
+    sessions per subject (maximum, not verified against the release). Related
+    publication: Gates, Hauser & Sellers, "A longitudinal study of P300
+    brain-computer interface and progression of amyotrophic lateral
+    sclerosis", 2011.
+    """
 
     nemar_id = "nm000157"
     __init__ = partialmethod(Mainsah2025.__init__, "B")
@@ -525,7 +730,11 @@ class Mainsah2025_B(Mainsah2025):
 
 
 class Mainsah2025_C(Mainsah2025):
-    """BigP3BCI Study C — 6x6 checkerboard with ERN (19 healthy subjects)."""
+    """BigP3BCI Study C — 9x8 checkerboard with error-related potentials, 1 session.
+
+    PhysioNet Table 1: 19 participants; related publication: Mainsah et al.,
+    IEEE TNSRE 23(5), 2015 ("Moving away from error-related potentials...").
+    """
 
     nemar_id = "nm000326"
     __init__ = partialmethod(Mainsah2025.__init__, "C")
@@ -533,7 +742,11 @@ class Mainsah2025_C(Mainsah2025):
 
 
 class Mainsah2025_D(Mainsah2025):
-    """BigP3BCI Study D — 6x6 dynamic/row-column (17 healthy subjects)."""
+    """BigP3BCI Study D — 9x8 row-column paradigm, 1 session.
+
+    PhysioNet Table 1: 17 participants; related publication: Mainsah et al.,
+    IEEE TNSRE 22(4), 2014 (language-model dynamic data collection).
+    """
 
     nemar_id = "nm000301"
     __init__ = partialmethod(Mainsah2025.__init__, "D")
@@ -541,7 +754,11 @@ class Mainsah2025_D(Mainsah2025):
 
 
 class Mainsah2025_E(Mainsah2025):
-    """BigP3BCI Study E — 6x6 checkerboard (8 healthy subjects)."""
+    """BigP3BCI Study E — 9x8 checkerboard, 1 session.
+
+    PhysioNet Table 1: 8 participants; "The experiment protocol of study E is
+    similar to that of study D" (no dedicated publication).
+    """
 
     nemar_id = "nm000186"
     __init__ = partialmethod(Mainsah2025.__init__, "E")
@@ -549,7 +766,12 @@ class Mainsah2025_E(Mainsah2025):
 
 
 class Mainsah2025_F(Mainsah2025):
-    """BigP3BCI Study F — 6x6 multi-paradigm, 3 sessions (10 healthy subjects)."""
+    """BigP3BCI Study F — 9x8 checkerboard, 3 sessions, ALS end users.
+
+    PhysioNet Table 1: 10 participants, "Has Target End User? Yes"; related
+    publication: Mainsah et al., J. Neural Eng. 12(1), 2015 ("Increasing BCI
+    communication rates with dynamic stopping ... An ALS study").
+    """
 
     nemar_id = "nm000191"
     __init__ = partialmethod(Mainsah2025.__init__, "F")
@@ -557,7 +779,11 @@ class Mainsah2025_F(Mainsah2025):
 
 
 class Mainsah2025_G(Mainsah2025):
-    """BigP3BCI Study G — 9x8 checkerboard/dynamic (20 healthy subjects)."""
+    """BigP3BCI Study G — 9x8 checkerboard, 1 session.
+
+    PhysioNet Table 1: 20 participants; related publication: Mainsah et al.,
+    6th International BCI Conference, Graz, 2014.
+    """
 
     nemar_id = "nm000277"
     __init__ = partialmethod(Mainsah2025.__init__, "G")
@@ -565,7 +791,11 @@ class Mainsah2025_G(Mainsah2025):
 
 
 class Mainsah2025_H(Mainsah2025):
-    """BigP3BCI Study H — 9x8 checkerboard with gaze conditions (16 healthy subjects)."""
+    """BigP3BCI Study H — 9x8 checkerboard with eye-tracker data, 1 session.
+
+    PhysioNet Table 1: 16 participants; related publication: Kalika et al.,
+    J. Neural Eng. 14(5), 2017 (fusion of P300 and eye-tracker data).
+    """
 
     nemar_id = "nm000218"
     __init__ = partialmethod(Mainsah2025.__init__, "H")
@@ -573,7 +803,11 @@ class Mainsah2025_H(Mainsah2025):
 
 
 class Mainsah2025_I(Mainsah2025):
-    """BigP3BCI Study I — 9x8 checkerboard/performance-based (13 healthy subjects)."""
+    """BigP3BCI Study I — 9x8 checkerboard/performance-based paradigms, 1 session.
+
+    PhysioNet Table 1: 13 participants; "The experiment protocol of study I is
+    similar to that of study J".
+    """
 
     nemar_id = "nm000200"
     __init__ = partialmethod(Mainsah2025.__init__, "I")
@@ -581,7 +815,11 @@ class Mainsah2025_I(Mainsah2025):
 
 
 class Mainsah2025_J(Mainsah2025):
-    """BigP3BCI Study J — 9x8 performance-based/row-column (20 healthy subjects)."""
+    """BigP3BCI Study J — 6x6 row-column/performance-based paradigms, 1 session.
+
+    PhysioNet Table 1: 20 participants; related publication: Mainsah et al.,
+    J. Neural Eng. 14(4), 2017 (performance-prediction paradigm design).
+    """
 
     nemar_id = "nm000340"
     __init__ = partialmethod(Mainsah2025.__init__, "J")
@@ -589,7 +827,12 @@ class Mainsah2025_J(Mainsah2025):
 
 
 class Mainsah2025_K(Mainsah2025):
-    """BigP3BCI Study K — 9x8 adaptive/checkerboard, 2 sessions (5 healthy subjects)."""
+    """BigP3BCI Study K — 9x8 checkerboard/adaptive paradigms, 1 or 2 sessions.
+
+    PhysioNet Table 1: 5 participants, "1 or 2" sessions (the loader declares
+    2); related publication: Mainsah et al., NeurIPS 31, 2018
+    (information-based adaptive stimulus selection).
+    """
 
     nemar_id = "nm000176"
     __init__ = partialmethod(Mainsah2025.__init__, "K")
@@ -605,7 +848,7 @@ class Mainsah2025_L(Mainsah2025):
 
 
 class Mainsah2025_M(Mainsah2025):
-    """BigP3BCI Study M — 9x8 adaptive/checkerboard (21 ALS subjects)."""
+    """BigP3BCI Study M — 9x8 checkerboard/adaptive-diffuse (21 healthy subjects)."""
 
     nemar_id = "nm000197"
     __init__ = partialmethod(Mainsah2025.__init__, "M")
@@ -613,7 +856,7 @@ class Mainsah2025_M(Mainsah2025):
 
 
 class Mainsah2025_N(Mainsah2025):
-    """BigP3BCI Study N — 9x8 dry/wet electrode comparison (8 ALS subjects)."""
+    """BigP3BCI Study N — 6x6 dry/wet electrode comparison (8 ALS subjects)."""
 
     nemar_id = "nm000187"
     __init__ = partialmethod(Mainsah2025.__init__, "N")
@@ -621,7 +864,7 @@ class Mainsah2025_N(Mainsah2025):
 
 
 class Mainsah2025_O(Mainsah2025):
-    """BigP3BCI Study O — 9x8 supervised/checkerboard (18 ALS subjects)."""
+    """BigP3BCI Study O — 9x8 checkerboard with/without suppressed characters (18 healthy subjects)."""
 
     nemar_id = "nm000303"
     __init__ = partialmethod(Mainsah2025.__init__, "O")
@@ -629,7 +872,7 @@ class Mainsah2025_O(Mainsah2025):
 
 
 class Mainsah2025_P(Mainsah2025):
-    """BigP3BCI Study P — 9x8 predictive/non-predictive spelling (19 ALS subjects)."""
+    """BigP3BCI Study P — 9x8 predictive/non-predictive spelling (19 healthy subjects)."""
 
     nemar_id = "nm000351"
     __init__ = partialmethod(Mainsah2025.__init__, "P")
@@ -637,7 +880,7 @@ class Mainsah2025_P(Mainsah2025):
 
 
 class Mainsah2025_Q(Mainsah2025):
-    """BigP3BCI Study Q — 6x6 color intensification (36 ALS subjects)."""
+    """BigP3BCI Study Q — 9x8 checkerboard/checkerboard-colour (36 healthy subjects)."""
 
     nemar_id = "nm000321"
     __init__ = partialmethod(Mainsah2025.__init__, "Q")
@@ -645,7 +888,7 @@ class Mainsah2025_Q(Mainsah2025):
 
 
 class Mainsah2025_R(Mainsah2025):
-    """BigP3BCI Study R — 9x8 multi-face paradigms (20 ALS subjects)."""
+    """BigP3BCI Study R — 9x8 multi-face paradigms (20 healthy subjects)."""
 
     nemar_id = "nm000336"
     __init__ = partialmethod(Mainsah2025.__init__, "R")

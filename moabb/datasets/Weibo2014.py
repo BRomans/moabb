@@ -29,7 +29,7 @@ from moabb.datasets.metadata.schema import (
 )
 
 from .base import BaseDataset
-from .download import get_dataset_path
+from .download import fill_from_store, get_dataset_path
 
 
 log = logging.getLogger(__name__)
@@ -291,7 +291,6 @@ class Weibo2014(BaseDataset):
             bandpass={"low_cutoff_hz": 0.5, "high_cutoff_hz": 50.0},
             notch_hz=None,
             artifact_methods=None,
-            re_reference="nose",
             downsampled_to_hz=200.0,
         ),
         signal_processing=SignalProcessingMetadata(
@@ -372,7 +371,7 @@ class Weibo2014(BaseDataset):
             struct_as_record=False,
             verify_compressed_data_integrity=False,
         )
-        montage = mne.channels.make_standard_montage("standard_1005")
+        montage = mne.channels.make_standard_montage("colin27_1005")
 
         # fmt: off
         ch_names = [
@@ -420,4 +419,11 @@ class Weibo2014(BaseDataset):
         basepath = os.path.join(path, "MNE-weibo-2014")
         if not os.path.isdir(basepath):
             os.makedirs(basepath)
+        # The NEMAR deposit (nm000146) keeps the renamed subject_N.mat files:
+        # take the subject's file from the local store before downloading the
+        # Dataverse archive of its group.
+        if not force_update:
+            fill_from_store(
+                basepath, [os.path.join(basepath, "subject_{}.mat".format(subject))]
+            )
         return eeg_data_path(basepath, subject, force_update=force_update)

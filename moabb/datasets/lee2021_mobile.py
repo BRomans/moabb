@@ -17,9 +17,12 @@ from .metadata.schema import (
     BCIApplicationMetadata,
     CrossValidationMetadata,
     DatasetMetadata,
+    DataStructureMetadata,
     DocumentationMetadata,
     ExperimentMetadata,
+    ParadigmSpecificMetadata,
     ParticipantMetadata,
+    PreprocessingMetadata,
     SignalProcessingMetadata,
     Tags,
 )
@@ -43,19 +46,25 @@ class Lee2021Mobile(BaseDataset):
     - **ERP**: Target ('OOO') vs non-target ('XXX'), 300 trials/session
 
     Data is in BrainVision format (.eeg/.vhdr/.vmrk) organized as BIDS on OSF.
+    The OSF project holds each recording twice under the same file name: the
+    BIDS copy (``/sub-XX/``, 73 channels at 100 Hz, EEG merged with the IMU)
+    and the original recording (``/sourcedata/sub-XX/``, 50 channels at
+    500 Hz: 32 scalp-EEG, 4 EOG and 14 ear-EEG; the header types HEOGL/HEOGR
+    as EOG and VEOGU/VEOGL as EEG). MOABB always downloads and loads the
+    original 500 Hz recording; the IMU channels are not loaded.
 
     Sessions correspond to motion conditions:
     - Session '02': Standing (0 m/s)
     - Session '03': Slow walking (0.8 m/s)
     - Session '04': Fast walking (1.6 m/s)
-    - Session '05': Slight running (2.0 m/s) [subjects 1-18 only]
+    - Session '05': Slight running (2.0 m/s) [subjects 1-19 in ERP, 1-18 in SSVEP except sub-10]
 
     For ERP, session '01' is also available (training, standing only).
 
     Warnings
     --------
-    Not all subjects have session '05' (2.0 m/s running). Subjects 19-24
-    only have sessions 01-04.
+    Not all subjects have session '05' (2.0 m/s running). Subjects 20-24
+    only have sessions 01-04 (and subject 10 lacks SSVEP session 05).
 
     The BIDS events.tsv files have onset in samples (not seconds as BIDS
     requires), so data is loaded via MNE's BrainVision reader directly
@@ -71,10 +80,11 @@ class Lee2021Mobile(BaseDataset):
 
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
-            sampling_rate=100.0,
-            channel_types={"eeg": 73},
+            sampling_rate=500.0,
+            channel_types={"eeg": 46, "eog": 4},
             montage="standard_1005",
-            hardware="BrainAmp (Brain Product GmbH)",
+            hardware="BrainAmp (Brain Product GmbH) + Smarting wireless amplifier (mBrainTrain)",
+            software="MATLAB 2018a, Psychophysics Toolbox, BrainVision, Smarting Android application",
             line_freq=60.0,
             sensor_type="Ag/AgCl",
             electrode_material="Ag/AgCl",
@@ -88,7 +98,7 @@ class Lee2021Mobile(BaseDataset):
         participants=ParticipantMetadata(
             n_subjects=23,
             health_status="healthy",
-            gender={"male": 13, "female": 10},
+            gender={"male": 14, "female": 9},
             age_mean=24.5,
             age_min=19,
             age_max=32,
@@ -150,6 +160,8 @@ class Lee2021Mobile(BaseDataset):
             paradigm="ssvep",
             events={"5.45": 11, "8.57": 12, "12.0": 13},
             n_classes=3,
+            class_labels=["5.45", "8.57", "12.0"],
+            trials_per_class={"5.45": 20, "8.57": 20, "12.0": 20},
             trial_duration=5.0,
             stimulus_type="visual flicker",
             stimulus_modalities=["visual"],
@@ -168,7 +180,10 @@ class Lee2021Mobile(BaseDataset):
             ],
             senior_author="Seong-Whan Lee",
             institution="Korea University",
+            institution_department="Department of Brain and Cognitive Engineering; Department of Artificial Intelligence",
+            institution_address="145 Anam-ro, Seongbuk-gu, Seoul, 02841, South Korea",
             country="KR",
+            contact_info=["ye_lee@korea.ac.kr", "sw.lee@korea.ac.kr"],
             repository="OSF",
             data_url="https://osf.io/r7s9b/",
             license="CC BY 4.0",
@@ -183,9 +198,26 @@ class Lee2021Mobile(BaseDataset):
             ],
             keywords=["SSVEP", "ERP", "mobile BCI", "ear-EEG", "locomotion"],
         ),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="ssvep",
+            stimulus_frequencies_hz=[5.45, 8.57, 12.0],
+            n_targets=3,
+            soa_ms=7000.0,
+            isi_ms=2000.0,
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials=60,
+            n_trials_per_class={"5.45": 20, "8.57": 20, "12.0": 20},
+            trials_context="60 trials per session (20 per target frequency)",
+        ),
+        preprocessing=PreprocessingMetadata(
+            data_state="raw",
+            preprocessing_applied=False,
+            notes="MOABB loads raw 500 Hz /sourcedata/ BrainVision files (32 scalp-EEG, 4 EOG, 14 ear-EEG).",
+        ),
         signal_processing=SignalProcessingMetadata(
-            classifiers=["rLDA", "CCA"],
-            feature_extraction=["power_over_time_intervals", "CCA"],
+            classifiers=["CCA"],
+            feature_extraction=["canonical_correlation_analysis", "PSD"],
             frequency_bands={
                 "delta": [0.5, 3.5],
                 "theta": [3.5, 7.5],
@@ -195,7 +227,7 @@ class Lee2021Mobile(BaseDataset):
             spatial_filters=None,
         ),
         cross_validation=CrossValidationMetadata(
-            cv_method="holdout", evaluation_type=["within_subject"]
+            cv_method="training_free (CCA)", evaluation_type=["within_subject"]
         ),
         bci_application=BCIApplicationMetadata(
             applications=["mobile_BCI"], environment="treadmill"
@@ -282,6 +314,18 @@ class Lee2021Mobile(BaseDataset):
 
             raw = mne.io.read_raw_brainvision(str(vhdr_path), preload=True, verbose=False)
 
+            # The /sourcedata/ .vhdr header types VEOGU/VEOGL as EEG; re-type all
+            # 4 EOG channels as 'eog' (and any IMU channels if present as 'misc').
+            ch_type_map = {}
+            for ch in raw.ch_names:
+                ch_upper = ch.upper()
+                if ch_upper in ("HEOGL", "HEOGR", "VEOGU", "VEOGL"):
+                    ch_type_map[ch] = "eog"
+                elif any(tag in ch_upper for tag in ("ACC", "GYRO", "MAG")):
+                    ch_type_map[ch] = "misc"
+            if ch_type_map:
+                raw.set_channel_types(ch_type_map, verbose=False)
+
             # Rename stimulus markers to match event names
             if self._task_name == "SSVEP":
                 raw.annotations.rename(self._SSVEP_MARKER_MAP)
@@ -321,36 +365,135 @@ class Lee2021Mobile(BaseDataset):
             )
         return [str(f) for f in vhdr_files]
 
+    # BrainVision files the loader reads. OSF r7s9b stores each of them twice
+    # under the same file name: the BIDS copy (``/sub-XX/ses-YY/eeg/``, 73
+    # channels at 100 Hz: EEG and EOG resampled and merged with the IMU
+    # channels) and the original recording (``/sourcedata/sub-XX/ses-YY/eeg/``,
+    # 50 channels at 500 Hz). The loader only reads the original recording.
+    _EEG_EXTENSIONS = (".vhdr", ".eeg", ".vmrk")
+    _ROOT_FILES = ("dataset_description.json", "participants.tsv", "participants.json")
+
     def _download_from_osf(self, subject, bids_root, force_update, verbose):
-        """Download subject files from OSF per-file API."""
+        """Download subject files from OSF per-file API.
+
+        Files are selected by their path on OSF, not by file name: the
+        BrainVision files come from ``/sourcedata/sub-XX/`` only (see
+        :meth:`_select_osf_files`). They are stored at the same local path
+        as before (``sub-XX/ses-YY/eeg/<file name>``).
+        """
         bids_root.mkdir(parents=True, exist_ok=True)
 
         metainfo = self._get_metainfo()
+        try:
+            to_download = self._select_osf_files(metainfo, subject, self._task_name)
+        except FileNotFoundError:
+            # The listing may be incomplete (OSF errors are logged and the
+            # folder skipped): list again on the next call.
+            type(self)._metainfo_cache = None
+            raise
 
         # Download root BIDS files
-        for fname in [
-            "dataset_description.json",
-            "participants.tsv",
-            "participants.json",
-        ]:
+        for fname in self._ROOT_FILES:
             local_path = bids_root / fname
             if not local_path.exists() or force_update:
                 matches = metainfo[metainfo["filename"] == fname]
+                if "path" in metainfo.columns:
+                    at_root = matches[matches["path"] == f"/{fname}"]
+                    if not at_root.empty:
+                        matches = at_root
                 if not matches.empty:
                     url = matches.iloc[0]["url"]
-                    dl.download_if_missing(str(local_path), url, warn_missing=False)
+                    dl.download_if_missing(
+                        str(local_path),
+                        url,
+                        warn_missing=False,
+                        force_update=force_update,
+                    )
 
         # Download subject files
-        sub_str = f"sub-{subject:02d}"
-        sub_files = metainfo[metainfo["filename"].str.startswith(sub_str)]
-
-        for _, row in sub_files.iterrows():
-            fname = row["filename"]
-            url = row["url"]
+        for fname, url in to_download.items():
             local_path = self._filename_to_bids_path(fname, bids_root)
             if not local_path.exists() or force_update:
                 local_path.parent.mkdir(parents=True, exist_ok=True)
-                dl.download_if_missing(str(local_path), url, warn_missing=False)
+                dl.download_if_missing(
+                    str(local_path), url, warn_missing=False, force_update=force_update
+                )
+
+    @classmethod
+    def _select_osf_files(cls, metainfo, subject, task):
+        """Pick the OSF copy of each of one subject's files.
+
+        Parameters
+        ----------
+        metainfo : pandas.DataFrame
+            OSF listing from :func:`moabb.datasets.download.create_metainfo_osf`,
+            with ``filename``, ``url`` and ``path`` columns.
+        subject : int
+            Subject number.
+        task : str
+            ``"ERP"`` or ``"SSVEP"``; its recordings must all be available
+            in ``/sourcedata/``.
+
+        Returns
+        -------
+        files : dict
+            ``{file name: download url}``, one entry per local file name.
+            BrainVision files (``.vhdr``, ``.eeg``, ``.vmrk``) are taken from
+            ``/sourcedata/sub-XX/`` only, whatever the listing order; other
+            files from ``/sourcedata/sub-XX/`` when present there, else from
+            the BIDS copy ``/sub-XX/``.
+
+        Raises
+        ------
+        FileNotFoundError
+            If a BrainVision file of a ``task`` recording listed on OSF
+            (in either copy) is missing from ``/sourcedata/sub-XX/``.
+        """
+        if "path" not in metainfo.columns:
+            raise ValueError(
+                "The OSF listing has no 'path' column, so the /sourcedata/ "
+                "copy of the EEG files cannot be told apart from the BIDS "
+                "copy (same file names, 100 Hz instead of 500 Hz)."
+            )
+        sub = f"sub-{subject:02d}"
+        paths = metainfo["path"].astype(str)
+        names = metainfo["filename"].astype(str)
+        is_eeg = names.str.endswith(cls._EEG_EXTENSIONS)
+        in_source = paths.str.startswith(f"/sourcedata/{sub}/")
+        in_bids = paths.str.startswith(f"/{sub}/")
+
+        files = {}
+        # Other files: BIDS copy first, overridden by the /sourcedata/ copy.
+        for mask in (in_bids & ~is_eeg, in_source & ~is_eeg):
+            files.update(zip(names[mask], metainfo["url"][mask]))
+        # BrainVision files: /sourcedata/ only.
+        source_eeg = dict(
+            zip(names[in_source & is_eeg], metainfo["url"][in_source & is_eeg])
+        )
+        files.update(source_eeg)
+
+        suffix = f"_task-{task}_eeg.vhdr"
+        recordings = {
+            name[: -len(".vhdr")]
+            for name in names[in_source | in_bids]
+            if name.startswith(f"{sub}_") and name.endswith(suffix)
+        }
+        missing = sorted(
+            stem + ext
+            for stem in recordings
+            for ext in cls._EEG_EXTENSIONS
+            if stem + ext not in source_eeg
+        )
+        if missing:
+            raise FileNotFoundError(
+                f"Lee2021Mobile subject {subject}, task {task}: the OSF listing "
+                f"of project {OSF_CODE} has no /sourcedata/{sub}/ copy of "
+                f"{', '.join(missing)}. MOABB reads only that copy (50 channels "
+                "at 500 Hz); the BIDS copy under the same name is 73 channels "
+                "at 100 Hz and is not used. The listing may be incomplete if "
+                f"OSF returned errors; retry later or check https://osf.io/{OSF_CODE}/."
+            )
+        return files
 
     @staticmethod
     def _filename_to_bids_path(filename, bids_root):
@@ -392,10 +535,11 @@ class Lee2021Mobile_ERP(Lee2021Mobile):
     nemar_id = "nm000201"
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
-            sampling_rate=100.0,
-            channel_types={"eeg": 73},
+            sampling_rate=500.0,
+            channel_types={"eeg": 46, "eog": 4},
             montage="standard_1005",
-            hardware="BrainAmp (Brain Product GmbH)",
+            hardware="BrainAmp (Brain Product GmbH) + Smarting wireless amplifier (mBrainTrain)",
+            software="MATLAB 2018a, Psychophysics Toolbox, BrainVision, Smarting Android application",
             line_freq=60.0,
             sensor_type="Ag/AgCl",
             electrode_material="Ag/AgCl",
@@ -468,9 +612,11 @@ class Lee2021Mobile_ERP(Lee2021Mobile):
             ],
         ),
         experiment=ExperimentMetadata(
+            class_labels=["Target", "NonTarget"],
             paradigm="p300",
             events={"Target": 2, "NonTarget": 1},
             n_classes=2,
+            trials_per_class={"Target": 60, "NonTarget": 240},
             trial_duration=1.0,
             stimulus_type="visual oddball",
             stimulus_modalities=["visual"],
@@ -489,7 +635,10 @@ class Lee2021Mobile_ERP(Lee2021Mobile):
             ],
             senior_author="Seong-Whan Lee",
             institution="Korea University",
+            institution_department="Department of Brain and Cognitive Engineering; Department of Artificial Intelligence",
+            institution_address="145 Anam-ro, Seongbuk-gu, Seoul, 02841, South Korea",
             country="KR",
+            contact_info=["ye_lee@korea.ac.kr", "sw.lee@korea.ac.kr"],
             repository="OSF",
             data_url="https://osf.io/r7s9b/",
             license="CC BY 4.0",
@@ -503,6 +652,34 @@ class Lee2021Mobile_ERP(Lee2021Mobile):
                 "IITP No. 2019-0-00079",
             ],
             keywords=["SSVEP", "ERP", "mobile BCI", "ear-EEG", "locomotion"],
+        ),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="p300", n_targets=2, soa_ms=1000.0, isi_ms=500.0
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials=300,
+            n_trials_per_class={"Target": 60, "NonTarget": 240},
+            trials_context="300 trials per session (60 Target 'OOO', 240 NonTarget 'XXX')",
+        ),
+        preprocessing=PreprocessingMetadata(
+            data_state="raw",
+            preprocessing_applied=False,
+            notes="MOABB loads raw 500 Hz /sourcedata/ BrainVision files (32 scalp-EEG, 4 EOG, 14 ear-EEG).",
+        ),
+        signal_processing=SignalProcessingMetadata(
+            classifiers=["rLDA"],
+            feature_extraction=["time_interval_averaging"],
+            frequency_bands={
+                "delta": [0.5, 3.5],
+                "theta": [3.5, 7.5],
+                "alpha": [7.5, 12.5],
+                "beta": [12.5, 30.0],
+            },
+            spatial_filters=None,
+        ),
+        cross_validation=CrossValidationMetadata(
+            cv_method="holdout (Session 01 train -> Sessions 02-05 test)",
+            evaluation_type=["within_subject", "cross_session"],
         ),
         bci_application=BCIApplicationMetadata(
             environment="mobile", online_feedback=False

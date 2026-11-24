@@ -6,15 +6,17 @@ URL PATH: https://zenodo.org/record/7554429
 
 import warnings
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
+import mne
 import numpy as np
 import pandas as pd
 from mne.channels import make_standard_montage
-from mne_bids import BIDSPath, get_entity_vals, read_raw_bids
 from tqdm import tqdm
 
 from moabb.datasets import download as dl
+from moabb.datasets.download import NemarDownloadError, nemar_sourcedata_dl
 from moabb.datasets.metadata.schema import (
     AcquisitionMetadata,
     AuxiliaryChannelsMetadata,
@@ -30,8 +32,19 @@ from moabb.datasets.metadata.schema import (
     SignalProcessingMetadata,
     Tags,
 )
+from moabb.utils import get_download_provider
 
 from .base import BaseDataset
+
+
+def __getattr__(name):
+    if name in ("BIDSPath", "get_entity_vals", "read_raw_bids"):
+        import mne_bids
+
+        val = getattr(mne_bids, name)
+        globals()[name] = val
+        return val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 _manifest_link = "https://osf.io/download/p5av2/"
@@ -44,12 +57,47 @@ _api_base_url = f"https://files.de-1.osf.io/v1/resources/{_osf_tag}/providers/os
 # only select subject ranges, so every class shares this root.
 DATASET_FOLDER = "MNE-dreyer2023-data"
 
+# The NEMAR deposit's sourcedata/ mirrors each subject's 6 run EDFs under
+# their upstream BIDS-style names (e.g. sub-01/eeg/sub-01_task-R1acquisition_
+# eeg.edf), zero-padded to 2 digits. It ships no dataset_description.json or
+# sidecars, so these cannot be read through read_raw_bids/BIDSPath -- read
+# them directly with mne.io.read_raw_edf instead. Subject 59's missing
+# R5online/R6online files (see the OSF-path exception below) are simply
+# absent from the store, so no special-casing is needed here.
+_STORE_SKIP_SUBSTRINGS = ("baseline", "rest")
+
+
+def _store_edf_files(store, subject):
+    """List subject's run EDFs already mirrored in the NEMAR sourcedata store.
+
+    Returns an empty list (not an error) when the store has nothing for this
+    subject yet; the caller decides what to do with that.
+    """
+    subject_dir = Path(store) / f"sub-{subject:02d}" / "eeg"
+    if not subject_dir.is_dir():
+        return []
+    files = sorted(subject_dir.glob(f"sub-{subject:02d}_task-*_eeg.edf"))
+    return [
+        f for f in files if not any(skip in f.name for skip in _STORE_SKIP_SUBSTRINGS)
+    ]
+
+
+def _store_task(path):
+    """Extract the BIDS task label from a sourcedata EDF filename."""
+    return path.name.split("task-", 1)[1].rsplit("_eeg.edf", 1)[0]
+
 
 class _Dreyer2023Base(BaseDataset):
     """
     Parent class of Dreyer2023A, Dreyer2023B and Dreyer2023C.
     Should not be instantiated.
     """
+
+    # The NEMAR deposit's sourcedata/ labels subjects zero-padded to 2 digits
+    # (sub-01 .. sub-87); its root BIDS conversion uses unpadded sub-1 ..
+    # sub-87, but that root is not what sourcedata_path()/_store_edf_files
+    # read from.
+    nemar_subject_template = "{subject:02d}"
 
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
@@ -104,7 +152,6 @@ class _Dreyer2023Base(BaseDataset):
                 eog_type=["horizontal", "vertical"],
                 has_emg=True,
                 emg_channels=2,
-                other_physiological=["gsr"],
             ),
         ),
         participants=ParticipantMetadata(
@@ -116,13 +163,13 @@ class _Dreyer2023Base(BaseDataset):
             age_max=59,
             bci_experience="naive",
             handedness="right",
-            species="human",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             events={"left_hand": 1, "right_hand": 2},
             paradigm="imagery",
             n_classes=2,
-            class_labels=["right_hand", "left_hand"],
+            class_labels=["left_hand", "right_hand"],
             trial_duration=8.0,
             study_design="Graz protocol",
             feedback_type="continuous visual",
@@ -161,6 +208,7 @@ class _Dreyer2023Base(BaseDataset):
             ethics_approval=[
                 "Inria's ethics committee, the COERLE (Approval number: 2018-13)"
             ],
+            acknowledgements="The authors are grateful to Aurélien Appriou, Damien Caselli, Camille Benaroch, Maria Sayu Yamamoto, Thibaut Monseigne and the experimenters for their help in collecting the data.",
             keywords=[
                 "motor imagery",
                 "brain-computer interface",
@@ -221,7 +269,7 @@ class _Dreyer2023Base(BaseDataset):
             n_blocks=6,
             block_duration_s=420.0,
         ),
-        file_format="GDF",
+        file_format="EDF",
         data_processed=False,
         sessions_per_subject=1,
         runs_per_session=6,
@@ -249,7 +297,6 @@ class _Dreyer2023Base(BaseDataset):
         *,
         return_all_modalities=False,
     ):
-
         self.sub_id = sub_id
 
         if sub_id is None:
@@ -284,11 +331,24 @@ class _Dreyer2023Base(BaseDataset):
         # Get the file path for the subject's data
         files_path = self.data_path(subject)
         runs = {}
+        from mne_bids import BIDSPath, read_raw_bids
+
         for run_id, file in enumerate(files_path):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                # Read the subject's raw data and set the montage
-                raw = read_raw_bids(bids_path=file, verbose=False)
+                # Read the subject's raw data and set the montage. A store
+                # hit (file is a plain Path into NEMAR's sourcedata/, which
+                # ships no dataset_description.json or sidecars) is read
+                # directly; the OSF path's extracted BIDS folder still goes
+                # through read_raw_bids/BIDSPath. The EDF itself carries the
+                # 769/770 annotations in both cases, so the rest of this
+                # method is identical either way.
+                if isinstance(file, BIDSPath):
+                    raw = read_raw_bids(bids_path=file, verbose=False)
+                    task = file.task
+                else:
+                    raw = mne.io.read_raw_edf(file, preload=False, verbose=False)
+                    task = _store_task(Path(file))
                 raw = raw.load_data()
 
                 # Set the channel montage
@@ -301,20 +361,21 @@ class _Dreyer2023Base(BaseDataset):
 
                 raw.set_channel_types(mapping)
 
-                # The Zenodo BIDS archive ships no electrodes.tsv sidecar, so
-                # read_raw_bids leaves all EEG positions as NaN. The 27 EEG
-                # channels are standard 10-20 names, so fall back to the
-                # standard_1005 montage when positions are missing.
+                # Neither the Zenodo BIDS archive nor NEMAR's sourcedata/
+                # ships an electrodes.tsv sidecar, so EEG positions come back
+                # NaN. The 27 EEG channels are standard 10-20 names, so fall
+                # back to the standard_1005 montage when positions are
+                # missing.
                 eeg_idx = [i for i, t in enumerate(raw.get_channel_types()) if t == "eeg"]
                 if any(np.isnan(raw.info["chs"][i]["loc"][:3]).any() for i in eeg_idx):
                     raw.set_montage(
-                        make_standard_montage("standard_1005"), on_missing="ignore"
+                        make_standard_montage("colin27_1005"), on_missing="ignore"
                     )
 
                 # We are losting several annotations because there is no fuck
                 # place explaining what it is the events ids :)
                 raw.annotations.rename({"769": "left_hand", "770": "right_hand"})
-                runs.update({f"{run_id}{file.task}": raw})
+                runs.update({f"{run_id}{task}": raw})
 
         sessions = {"0": runs}
 
@@ -353,7 +414,37 @@ class _Dreyer2023Base(BaseDataset):
         if subject not in self.subject_list:
             raise ValueError("Invalid subject number")
 
-        # Download and extract the dataset
+        # Prefer the NEMAR sourcedata store when the provider policy allows
+        # it and this subject is already mirrored there (get_data() fills it
+        # via BaseDataset._prefetch_nemar_sourcedata before this is called).
+        # 'upstream' makes _sourcedata_store() return None, so it always
+        # skips straight to OSF below; 'nemar' must not silently reach OSF,
+        # so a missing store is fatal instead of falling through.
+        store = self._sourcedata_store()
+        if store is not None:
+            store_files = _store_edf_files(store, subject)
+            if store_files:
+                return store_files
+            if get_download_provider() == "nemar":
+                raise NemarDownloadError(
+                    f"{self.code} subject {subject} has no NEMAR sourcedata "
+                    f"cached at {store}. Fetch it first, e.g. with "
+                    f"{type(self).__name__}().sourcedata_path(subject={subject}), "
+                    "or switch the download provider away from 'nemar' to "
+                    "allow the OSF fallback."
+                )
+
+        # Download and extract the dataset from OSF
+        g = globals()
+        if "BIDSPath" not in g or "get_entity_vals" not in g:
+            from mne_bids import BIDSPath as _BIDSPath
+            from mne_bids import get_entity_vals as _get_entity_vals
+
+            g.setdefault("BIDSPath", _BIDSPath)
+            g.setdefault("get_entity_vals", _get_entity_vals)
+        BIDSPath = g["BIDSPath"]
+        get_entity_vals = g["get_entity_vals"]
+
         dataset_path = self.download_by_subject(
             subject=subject, path=path, force_update=force_update
         )
@@ -466,17 +557,53 @@ class _Dreyer2023Base(BaseDataset):
         :class:`pandas.DataFrame`
             A DataFrame containing the demographic information of the subjects.
         """
-        path = Path(dl.get_dataset_path("Dreyer2023", path)) / DATASET_FOLDER
-
-        # checking it there is manifest file in the dataset folder.
-        dl.download_if_missing(path / "performance.csv", _metainfo_link)
-
-        metainfo = pd.read_csv(path / "performance.csv", sep=";")
+        metainfo = self._subject_info_from_store(path=path)
+        if metainfo is None:
+            path_root = Path(dl.get_dataset_path("Dreyer2023", path)) / DATASET_FOLDER
+            dl.download_if_missing(path_root / "performance.csv", _metainfo_link)
+            metainfo = pd.read_csv(path_root / "performance.csv", sep=";")
 
         if self.sub_id == "":
             return metainfo
         else:
             return metainfo[metainfo["SUBDATASET"] == self.sub_id].reset_index(drop=True)
+
+    def _subject_info_from_store(self, path=None):
+        """Read performance.csv from the NEMAR sourcedata store, if possible.
+
+        Returns ``None`` (never raises, except when pinned to 'nemar') so the
+        caller falls back to the OSF copy -- exactly the policy
+        :meth:`BaseDataset._prefetch_nemar_sourcedata` applies to the EEG
+        files. ``_sourcedata_store`` already returns ``None`` for
+        ``nemar_id is None`` and for provider ``'upstream'``, so both are
+        handled for free here.
+        """
+        store = self._sourcedata_store()
+        if store is None:
+            return None
+        candidate = Path(store) / "performance.csv"
+        if not candidate.is_file():
+            try:
+                nemar_sourcedata_dl(
+                    self.nemar_id,
+                    self.code,
+                    path=path,
+                    include="sourcedata/performance.csv",
+                )
+            except NemarDownloadError as exc:
+                if get_download_provider() == "nemar":
+                    raise
+                warnings.warn(
+                    f"Could not fetch {self.code} performance.csv from NEMAR "
+                    f"({self.nemar_id}); falling back to the OSF copy. "
+                    f"Original error: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return None
+        if not candidate.is_file():
+            return None
+        return pd.read_csv(candidate, sep=";")
 
 
 class Dreyer2023A(_Dreyer2023Base):
@@ -565,6 +692,20 @@ class Dreyer2023A(_Dreyer2023Base):
     """
 
     nemar_id = "nm000250"
+    # Dataset A subset of the shared root METADATA (paper, Participants):
+    # "60 participants (Dataset A; 29 women; age 19-59, M = 29, SD = 9.32)".
+    METADATA = replace(
+        _Dreyer2023Base.METADATA,
+        participants=replace(
+            _Dreyer2023Base.METADATA.participants,
+            n_subjects=60,
+            gender={"female": 29, "male": 31},
+            age_mean=29.0,
+            age_std=9.32,
+            age_min=19,
+            age_max=59,
+        ),
+    )
 
     def __init__(self, subjects=None, sessions=None, *, return_all_modalities=False):
         super().__init__(
@@ -660,6 +801,20 @@ class Dreyer2023B(_Dreyer2023Base):
     """
 
     nemar_id = "nm000250"
+    # Dataset B subset (paper, Participants): "21 participants (Dataset B;
+    # 8 women; age 19-37, M = 29, SD = 9.318)".
+    METADATA = replace(
+        _Dreyer2023Base.METADATA,
+        participants=replace(
+            _Dreyer2023Base.METADATA.participants,
+            n_subjects=21,
+            gender={"female": 8, "male": 13},
+            age_mean=29.0,
+            age_std=9.318,
+            age_min=19,
+            age_max=37,
+        ),
+    )
 
     def __init__(self, subjects=None, sessions=None, *, return_all_modalities=False):
         super().__init__(
@@ -686,9 +841,9 @@ class Dreyer2023C(_Dreyer2023Base):
     :Project leader: Lotte Fabien
     :Project member: Rimbert Sébastien; Monseigne Thibaut
 
-    Dataset Dreyer2023C contains EEG, EOG and EMG signals recorded on 6 healthy subjects
-    performing Left-Right Motor Imagery experiments (4 women) who participated in datasets
-    A or B.
+    Dataset Dreyer2023C contains EEG, EOG and EMG signals recorded on 6 healthy naive
+    subjects performing Left-Right Motor Imagery experiments (4 women, age 20-26,
+    M = 22, SD = 2.34) recorded after datasets A and B were published.
     In addition, for each recording the following pieces of information are provided:
     subject's demographic, personality and cognitive profiles, the OpenViBE experimental
     instructions and codes, and experimenter's gender.
@@ -751,6 +906,20 @@ class Dreyer2023C(_Dreyer2023Base):
     """
 
     nemar_id = "nm000250"
+    # Dataset C subset (paper, Participants): "6 additional participants
+    # (Dataset C; 4 women; age 20-26, M = 22; SD = 2.34)".
+    METADATA = replace(
+        _Dreyer2023Base.METADATA,
+        participants=replace(
+            _Dreyer2023Base.METADATA.participants,
+            n_subjects=6,
+            gender={"female": 4, "male": 2},
+            age_mean=22.0,
+            age_std=2.34,
+            age_min=20,
+            age_max=26,
+        ),
+    )
 
     def __init__(self, subjects=None, sessions=None, *, return_all_modalities=False):
         super().__init__(
@@ -779,7 +948,7 @@ class Dreyer2023(_Dreyer2023Base):
 
     Dataset Dreyer2023 contains concatenated datasets Dreyer2023A, Dreyer2023B and Dreyer2023C.
 
-    Experiments were conducted by six experimenters. In addition, for each recording
+    Experiments were conducted by eight experimenters. In addition, for each recording
     the following pieces of information are provided:
     subject's demographic, personality and cognitive profiles, the OpenViBE experimental
     instructions and codes, and experimenter's gender.
@@ -798,7 +967,7 @@ class Dreyer2023(_Dreyer2023Base):
         - t=3.00s  a red arrow appears (subject starts to perform task)
         - t=4.25s  the red arrow disappears
         - t=4.25s  the feedback on performance is given in the form of a blue bar
-          with update frequency of 14 Hz
+          with update frequency of 16 Hz
         - t=8.00s  cross turns off (subject stops to perform task)
 
     EEG signals [1]_:

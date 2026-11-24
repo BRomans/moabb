@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import functools
+import importlib.util
+import json
 import logging
+import sys
 import warnings
 from pathlib import Path
-from pickle import HIGHEST_PROTOCOL, dump
+from pickle import HIGHEST_PROTOCOL, PicklingError, dump
 from typing import Sequence
 
 import numpy as np
@@ -14,25 +17,41 @@ from sklearn.base import ClassifierMixin
 from sklearn.metrics import check_scoring
 from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
+from sklearn.utils.metaestimators import available_if
 
 
 log = logging.getLogger(__name__)
 
 
-try:
-    from optuna.distributions import CategoricalDistribution
-
-    optuna_available = True
-except ImportError:
-    optuna_available = False
+optuna_available = importlib.util.find_spec("optuna") is not None
+_carbonfootprint = importlib.util.find_spec("codecarbon") is not None
 
 
-try:
-    from codecarbon import EmissionsTracker, OfflineEmissionsTracker
+def __getattr__(name):
+    if name == "CategoricalDistribution":
+        from optuna.distributions import CategoricalDistribution
 
-    _carbonfootprint = True
-except ImportError:
-    _carbonfootprint = False
+        globals()["CategoricalDistribution"] = CategoricalDistribution
+        return CategoricalDistribution
+    if name == "OptunaSearchCVClassifier":
+        return _get_optuna_search_cv_classifier()
+    if name in ("EmissionsTracker", "OfflineEmissionsTracker"):
+        from codecarbon import EmissionsTracker, OfflineEmissionsTracker
+
+        globals()["EmissionsTracker"] = EmissionsTracker
+        globals()["OfflineEmissionsTracker"] = OfflineEmissionsTracker
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _sklearn_is_fitted_true():
+    """``__sklearn_is_fitted__`` that :func:`_ensure_fitted` sets on an estimator.
+
+    pickle stores it by reference to this module. A method bound to a local
+    function was stored as ``getattr(estimator, "_sklearn_is_fitted_true")``,
+    which does not exist on the class, so the saved model failed to load.
+    """
+    return True
 
 
 def _ensure_fitted(estimator):
@@ -64,26 +83,16 @@ def _ensure_fitted(estimator):
     We add a __sklearn_is_fitted__ method that returns True.
     """
 
-    # Define a method that returns True to indicate fitted state
-    def _sklearn_is_fitted_true(self):
-        return True
-
-    # Add __sklearn_is_fitted__ method if not present or if it returns False
+    # Add __sklearn_is_fitted__ if not present or if it returns False. It is a
+    # module-level function stored on the instance (not a method bound to a
+    # local function), so that saved models can be unpickled.
     if not hasattr(estimator, "__sklearn_is_fitted__"):
-        import types
-
-        estimator.__sklearn_is_fitted__ = types.MethodType(
-            _sklearn_is_fitted_true, estimator
-        )
+        estimator.__sklearn_is_fitted__ = _sklearn_is_fitted_true
     else:
         # Check if existing method returns False (unfitted)
         try:
             if not estimator.__sklearn_is_fitted__():
-                import types
-
-                estimator.__sklearn_is_fitted__ = types.MethodType(
-                    _sklearn_is_fitted_true, estimator
-                )
+                estimator.__sklearn_is_fitted__ = _sklearn_is_fitted_true
         except Exception:
             pass
 
@@ -128,6 +137,28 @@ def _check_if_is_pytorch_steps(model):
         return skorch_valid
 
 
+def _dump_model(model, file):
+    """Pickle ``model`` into the open binary ``file``.
+
+    pickle stores a function or class by reference to its module. In a joblib
+    worker (``n_jobs > 1``) the module of an object defined in a ``.py``
+    pipeline config cannot be imported, and neither can ``__main__`` objects
+    such as lambdas, so pickle fails there; cloudpickle stores those objects
+    by value instead. The file is read back with :func:`pickle.load` either way.
+    """
+    try:
+        dump(model, file, protocol=HIGHEST_PROTOCOL)
+    except (PicklingError, AttributeError):
+        try:
+            import cloudpickle  # a joblib dependency since joblib 1.6
+        except ImportError:
+            from joblib.externals import cloudpickle  # vendored before 1.6
+
+        file.seek(0)
+        file.truncate()
+        cloudpickle.dump(model, file, protocol=HIGHEST_PROTOCOL)
+
+
 def _save_model_cv(model: object, save_path: str | Path, cv_index: str | int):
     """Save a model fitted to a given fold from cross-validation.
 
@@ -150,6 +181,15 @@ def _save_model_cv(model: object, save_path: str | Path, cv_index: str | int):
     else:
         Path(save_path).mkdir(parents=True, exist_ok=True)
 
+    best = getattr(model, "best_estimator_", None)
+    if best is not None and _check_if_is_pytorch_steps(best):
+        # Search over a torch pipeline: save the refitted best pipeline like an
+        # unwrapped one (not a pickle of the search holding the live net) and
+        # keep the chosen hyper-parameters that the search pickle used to hold.
+        with open(Path(save_path) / f"best_params_{cv_index}.json", "w") as file:
+            json.dump(model.best_params_, file, default=str)
+        model = best
+
     if _check_if_is_pytorch_steps(model):
         for step_name in model.named_steps:
             step = model.named_steps[step_name]
@@ -164,10 +204,10 @@ def _save_model_cv(model: object, save_path: str | Path, cv_index: str | int):
                 )
             else:
                 with _open_lock((Path(save_path) / f"{file_step}.pkl"), "wb") as file:
-                    dump(step, file, protocol=HIGHEST_PROTOCOL)
+                    _dump_model(step, file)
     else:
         with _open_lock((Path(save_path) / f"fitted_model_{cv_index}.pkl"), "wb") as file:
-            dump(model, file, protocol=HIGHEST_PROTOCOL)
+            _dump_model(model, file)
 
 
 def _save_model_list(model_list: list | Pipeline, score_list: Sequence, save_path: str):
@@ -209,6 +249,8 @@ def _create_save_path(
     name: str,
     grid=False,
     eval_type="WithinSession",
+    paradigm=None,
+    suffix="",
 ):
     """Create a save path based on evaluation parameters.
 
@@ -229,6 +271,10 @@ def _create_save_path(
     eval_type : str, optional
        The type of evaluation, either 'WithinSession', 'CrossSession' or 'CrossSubject'.
        Defaults to WithinSession.
+    paradigm : str, optional
+       The paradigm name. When provided, it namespaces saved models by paradigm.
+    suffix : str, optional
+       An optional run suffix used as an additional namespace for saved models.
     Returns
     -------
     path_save: str
@@ -238,24 +284,13 @@ def _create_save_path(
         if eval_type != "WithinSession":
             session = ""
 
-        if grid:
-            path_save = (
-                Path(hdf5_path)
-                / f"GridSearch_{eval_type}"
-                / code
-                / f"{str(subject)}"
-                / str(session)
-                / str(name)
-            )
-        else:
-            path_save = (
-                Path(hdf5_path)
-                / f"Models_{eval_type}"
-                / code
-                / f"{str(subject)}"
-                / str(session)
-                / str(name)
-            )
+        model_type = f"GridSearch_{eval_type}" if grid else f"Models_{eval_type}"
+        path_save = Path(hdf5_path) / model_type
+        if paradigm is not None:
+            path_save /= str(paradigm)
+            if suffix:
+                path_save /= str(suffix)
+        path_save /= Path(code) / str(subject) / str(session) / str(name)
 
         return str(path_save)
     else:
@@ -283,6 +318,8 @@ def _convert_sklearn_params_to_optuna(param_grid: dict) -> dict:
             "Optuna is not available. Please install it optuna and optuna-integration."
         )
     else:
+        from optuna.distributions import CategoricalDistribution
+
         optuna_params = {}
         for key, value in param_grid.items():
             try:
@@ -303,50 +340,72 @@ def _convert_sklearn_params_to_optuna(param_grid: dict) -> dict:
 # This avoids the earlier need for dynamic factory logic and pickling issues
 # with locally scoped classes.
 
-try:
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", "OptunaSearchCV is experimental")
-        # OptunaSearchCV emits an ExperimentalWarning (subclass of FutureWarning)
-        # on import; suppress it since MOABB intentionally uses this API.
-        from optuna.integration import OptunaSearchCV as _BaseOptunaSearchCV
+_classifier_wrapper_available = optuna_available and (
+    importlib.util.find_spec("optuna_integration") is not None
+    or importlib.util.find_spec("optuna.integration") is not None
+)
 
-    # Monkey-patch _BaseOptunaSearchCV.__init__ to suppress the
-    # ExperimentalWarning on every instantiation (including sklearn clone).
 
-    _orig_init = _BaseOptunaSearchCV.__init__
-
-    @functools.wraps(_orig_init)
-    def _quiet_init(self, *args, **kwargs):
+def _get_optuna_search_cv_classifier():
+    """Lazily construct and cache OptunaSearchCVClassifier on first use."""
+    if "OptunaSearchCVClassifier" in globals():
+        return globals()["OptunaSearchCVClassifier"]
+    try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", "OptunaSearchCV is experimental")
-            _orig_init(self, *args, **kwargs)
+            # OptunaSearchCV emits an ExperimentalWarning (subclass of FutureWarning)
+            # on import; suppress it since MOABB intentionally uses this API.
+            from optuna.integration import OptunaSearchCV as _BaseOptunaSearchCV
 
-    _BaseOptunaSearchCV.__init__ = _quiet_init
+        # Monkey-patch _BaseOptunaSearchCV.__init__ to suppress the
+        # ExperimentalWarning on every instantiation (including sklearn clone).
+        _orig_init = _BaseOptunaSearchCV.__init__
 
-    class OptunaSearchCVClassifier(_BaseOptunaSearchCV, ClassifierMixin):
-        _estimator_type = "classifier"
+        @functools.wraps(_orig_init)
+        def _quiet_init(self, *args, **kwargs):
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", "OptunaSearchCV is experimental")
+                _orig_init(self, *args, **kwargs)
 
-        def __sklearn_tags__(self):  # scikit-learn >=1.7 tag override
-            tags = super().__sklearn_tags__()
+        _BaseOptunaSearchCV.__init__ = _quiet_init
 
-            if isinstance(tags, dict):
-                tags["estimator_type"] = "classifier"
+        class OptunaSearchCVClassifier(_BaseOptunaSearchCV, ClassifierMixin):
+            _estimator_type = "classifier"
+
+            # optuna-integration defines decision_function unconditionally, so
+            # ROC-AUC scorers call it on predict_proba-only estimators (skorch nets,
+            # GaussianNB) and crash. Guard it like scikit-learn's BaseSearchCV.
+            @available_if(
+                lambda self: hasattr(
+                    getattr(self, "best_estimator_", self.estimator), "decision_function"
+                )
+            )
+            def decision_function(self, X, **kwargs):
+                return super().decision_function(X, **kwargs)
+
+            def __sklearn_tags__(self):  # scikit-learn >=1.7 tag override
+                tags = super().__sklearn_tags__()
+
+                if isinstance(tags, dict):
+                    tags["estimator_type"] = "classifier"
+                    return tags
+
+                try:
+                    tags["estimator_type"] = "classifier"
+                except Exception:
+                    try:
+                        tags.estimator_type = "classifier"
+                    except Exception:
+                        return {"estimator_type": "classifier"}
+
                 return tags
 
-            try:
-                tags["estimator_type"] = "classifier"
-            except Exception:
-                try:
-                    tags.estimator_type = "classifier"
-                except Exception:
-                    return {"estimator_type": "classifier"}
-
-            return tags
-
-    _classifier_wrapper_available = True
-except ImportError:  # pragma: no cover - optuna not installed path
-    OptunaSearchCVClassifier = None
-    _classifier_wrapper_available = False
+        OptunaSearchCVClassifier.__qualname__ = "OptunaSearchCVClassifier"
+        globals()["OptunaSearchCVClassifier"] = OptunaSearchCVClassifier
+        return OptunaSearchCVClassifier
+    except ImportError:  # pragma: no cover - optuna not installed path
+        globals()["OptunaSearchCVClassifier"] = None
+        return None
 
 
 def check_search_available():
@@ -354,14 +413,15 @@ def check_search_available():
 
     Always returns a classifier-only OptunaSearchCV when optuna is installed.
     """
-    if _classifier_wrapper_available and OptunaSearchCVClassifier is not None:
+    if _classifier_wrapper_available:
 
         def OptunaSearchCV(estimator, param_distributions, **kwargs):
+            cls = _get_optuna_search_cv_classifier()
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore", "OptunaSearchCV is experimental", FutureWarning
                 )
-                return OptunaSearchCVClassifier(estimator, param_distributions, **kwargs)
+                return cls(estimator, param_distributions, **kwargs)
 
         search_methods = {"grid": GridSearchCV, "optuna": OptunaSearchCV}
         return search_methods, True
@@ -497,14 +557,36 @@ def _score_and_update(res, scorer, model, X, y_true):
 
 def _pipeline_requires_epochs(pipeline):
     """Check if any step in the pipeline requires MNE Epochs objects."""
-    from moabb.pipelines.classification import SSVEP_CCA, SSVEP_TRCA, SSVEP_MsetCCA
+    if "moabb.pipelines.classification" not in sys.modules:
+        return False
+    from moabb.pipelines.classification import (
+        SSVEP_CCA,
+        SSVEP_SSCOR,
+        SSVEP_TDCA,
+        SSVEP_TRCA,
+        SSVEP_TRCA_R,
+        SSVEP_eCCA,
+        SSVEP_itCCA,
+        SSVEP_MsetCCA,
+    )
+
+    epochs_classifiers = (
+        SSVEP_CCA,
+        SSVEP_TRCA,
+        SSVEP_MsetCCA,
+        SSVEP_itCCA,
+        SSVEP_eCCA,
+        SSVEP_TRCA_R,
+        SSVEP_SSCOR,
+        SSVEP_TDCA,
+    )
 
     # Handle non-pipeline classifiers (like DummyClassifier)
     if not hasattr(pipeline, "steps"):
-        return isinstance(pipeline, (SSVEP_CCA, SSVEP_TRCA, SSVEP_MsetCCA))
+        return isinstance(pipeline, epochs_classifiers)
 
     for _name, step in pipeline.steps:
-        if isinstance(step, (SSVEP_CCA, SSVEP_TRCA, SSVEP_MsetCCA)):
+        if isinstance(step, epochs_classifiers):
             return True
     return False
 
@@ -513,7 +595,11 @@ def _get_nchan(X):
     """Extract number of channels from data (Epochs or ndarray)."""
     from mne.epochs import BaseEpochs
 
-    return X.info["nchan"] if isinstance(X, BaseEpochs) else X.shape[1]
+    if isinstance(X, BaseEpochs):
+        return X.info["nchan"]
+    if X.dtype == object:  # nested trials of different shapes: the largest
+        return max(trial.shape[0] for trial in X)
+    return X.shape[1]
 
 
 class Emissions:
@@ -540,6 +626,8 @@ class Emissions:
             )
 
     def create_tracker(self):
+        from codecarbon import EmissionsTracker, OfflineEmissionsTracker
+
         if self.codecarbon_offline:
             tracker = OfflineEmissionsTracker(**self.codecarbon_config)
         else:

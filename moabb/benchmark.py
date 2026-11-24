@@ -1,35 +1,11 @@
+import importlib.util
 import logging
 import os
 import os.path as osp
 from pathlib import Path
 
-import mne
-import pandas as pd
-import yaml
-from mne.utils import _open_lock
 
-from moabb import paradigms as moabb_paradigms
-from moabb.analysis import analyze
-from moabb.datasets.base import BaseDataset
-from moabb.datasets.fake import FakeDataset
-from moabb.evaluations import (
-    CrossSessionEvaluation,
-    CrossSubjectEvaluation,
-    WithinSessionEvaluation,
-)
-from moabb.pipelines.utils import (
-    generate_paradigms,
-    generate_param_grid,
-    parse_pipelines_from_directory,
-)
-
-
-try:
-    from codecarbon import EmissionsTracker  # noqa
-
-    _carbonfootprint = True
-except ImportError:
-    _carbonfootprint = False
+_carbonfootprint = importlib.util.find_spec("codecarbon") is not None
 
 log = logging.getLogger(__name__)
 
@@ -189,6 +165,24 @@ def benchmark(  # noqa: C901
         Create the function to run the benchmark
     """
     # set logs
+    import mne
+    import pandas as pd
+    import yaml
+    from mne.utils import _open_lock
+
+    from moabb.datasets.fake import FakeDataset
+    from moabb.evaluations import (
+        CrossSessionEvaluation,
+        CrossSubjectEvaluation,
+        WithinSessionEvaluation,
+    )
+    from moabb.evaluations.utils import _pipeline_requires_epochs
+    from moabb.pipelines.utils import (
+        generate_paradigms,
+        generate_param_grid,
+        parse_pipelines_from_directory,
+    )
+
     if evaluations is None:
         evaluations = ["WithinSession", "CrossSession", "CrossSubject"]
 
@@ -262,6 +256,13 @@ def benchmark(  # noqa: C901
             if not compatible_datasets:
                 print(f"WARNING: Paradigm {paradigm} skipped.")
                 continue
+            # Without include/exclude lists the selection is the paradigm's own,
+            # so let the evaluation auto-select and filter it quietly (#862).
+            eval_datasets = (
+                None
+                if include_datasets is None and exclude_datasets is None
+                else compatible_datasets
+            )
 
             print(
                 f"Datasets considered for {paradigm} paradigm {[dt.code for dt in compatible_datasets]}"
@@ -269,7 +270,10 @@ def benchmark(  # noqa: C901
 
             ppl_with_epochs, ppl_with_array = {}, {}
             for pn, pv in prdgms_from_pipelines[paradigm].items():
-                if _ppl_needs_epochs(pn):
+                # By estimator type too: a renamed TRCA/CCA config otherwise
+                # gets label-encoded integers, which these classifiers read as
+                # stimulus frequencies (chance-level scores, no error).
+                if _ppl_needs_epochs(pn) or _pipeline_requires_epochs(pv):
                     ppl_with_epochs[pn] = pv
                 else:
                     ppl_with_array[pn] = pv
@@ -278,7 +282,7 @@ def benchmark(  # noqa: C901
                 # Keras pipelines require return_epochs=True
                 context = eval_type[evaluation](
                     paradigm=p,
-                    datasets=compatible_datasets,
+                    datasets=eval_datasets,
                     random_state=42,
                     hdf5_path=results,
                     n_jobs=n_jobs,
@@ -303,7 +307,7 @@ def benchmark(  # noqa: C901
             if len(ppl_with_array) > 0:
                 context = eval_type[evaluation](
                     paradigm=p,
-                    datasets=compatible_datasets,
+                    datasets=eval_datasets,
                     random_state=42,
                     hdf5_path=results,
                     n_jobs=n_jobs,
@@ -342,26 +346,24 @@ def benchmark(  # noqa: C901
 
 def _display_results(results):
     """Print results after computation."""
+    import pandas as pd
+
+    grouped = results.groupby(["dataset", "pipeline", "evaluation"], sort=False)
+    score_means = grouped["score"].mean()
+    carbon_sums = grouped["carbon_emission"].sum() if _carbonfootprint else None
     tab = []
     for d in results["dataset"].unique():
         for p in results["pipeline"].unique():
             for e in results["evaluation"].unique():
+                key = (d, p, e)
                 r = {
                     "dataset": d,
                     "evaluation": e,
                     "pipeline": p,
-                    "avg score": results[
-                        (results["dataset"] == d)
-                        & (results["pipeline"] == p)
-                        & (results["evaluation"] == e)
-                    ]["score"].mean(),
+                    "avg score": score_means.get(key, float("nan")),
                 }
                 if _carbonfootprint:
-                    r["carbon emission"] = results[
-                        (results["dataset"] == d)
-                        & (results["pipeline"] == p)
-                        & (results["evaluation"] == e)
-                    ]["carbon_emission"].sum()
+                    r["carbon emission"] = carbon_sums.get(key, 0.0)
                 tab.append(r)
     tab = pd.DataFrame(tab)
     print(tab)
@@ -383,6 +385,8 @@ def _combine_paradigms(prdgm_results):
         Results with filterbank and direct paradigms combined
     """
     eval_results = prdgm_results.copy()
+    import pandas as pd
+
     combine_paradigms = ["SSVEP"]
     for p in combine_paradigms:
         if f"FilterBank{p}" in eval_results.keys() and f"{p}" in eval_results.keys():
@@ -405,6 +409,8 @@ def _save_results(eval_results, output, plot):
     plot: bool
         Plot results after computing
     """
+    from moabb.analysis import analyze
+
     for prdgm, prdgm_result in eval_results.items():
         prdgm_path = Path(output) / prdgm
         if not osp.isdir(prdgm_path):
@@ -444,11 +450,24 @@ def _inc_exc_datasets(
 
     # --- Inclusion logic ---
     if include_datasets is not None:
+        from moabb.datasets.base import BaseDataset
+        from moabb.datasets.fake import FakeDataset
+
         include_codes = _validate_list_per_paradigm(
             all_paradigm_codes, paradigm_name, include_datasets, "include_datasets"
         )
-        # Keep only included datasets
-        filtered = [ds for ds in paradigm_datasets if ds.code in include_codes]
+        # Use the caller's dataset objects (e.g. Shin2017A(accept=True)), not
+        # fresh defaults. FakeDatasets are already handled in ``benchmark``.
+        user_instances = {
+            ds.code: ds
+            for ds in include_datasets
+            if isinstance(ds, BaseDataset) and not isinstance(ds, FakeDataset)
+        }
+        filtered = [
+            user_instances.get(ds.code, ds)
+            for ds in paradigm_datasets
+            if ds.code in include_codes
+        ]
         return filtered
 
     # --- Exclusion logic ---
@@ -488,6 +507,8 @@ def _get_paradigm_instance(paradigm_name, context_params=None):
     ValueError
         If the paradigm name is not found in moabb.paradigms.
     """
+    from moabb import paradigms as moabb_paradigms
+
     context_params = context_params or {}
 
     # Find matching class name in moabb.paradigms, case-insensitive
@@ -550,6 +571,8 @@ def _validate_list_per_paradigm(all_paradigm_codes, paradigm_name, ds_list, list
         raise ValueError(f"{list_name} cannot be an empty list.")
 
     # Ensure homogeneity: all strings or all dataset objects
+    from moabb.datasets.base import BaseDataset
+
     all_str = all(isinstance(x, str) for x in ds_list)
     all_obj = all(isinstance(x, BaseDataset) for x in ds_list)
 

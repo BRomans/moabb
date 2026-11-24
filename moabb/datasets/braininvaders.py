@@ -106,7 +106,7 @@ def _bi_get_subject_data(ds, subject):  # noqa: C901
             run_name = "0"
             # fmt: off
             chnames = [
-                'Fp1', 'Fp2', 'F3', 'AFz', 'F4', 'T7', 'Cz', 'T8', 'P7',
+                'Fp1', 'Fp2', 'F5', 'AFz', 'F6', 'T7', 'Cz', 'T8', 'P7',
                 'P3', 'Pz', 'P4', 'P8', 'O1', 'Oz', 'O2', 'STI 014'
             ]
             # fmt: on
@@ -212,7 +212,7 @@ def _bi_get_subject_data(ds, subject):  # noqa: C901
         # Set it here rather than on each Raw: the Cattan2019-VR branch below
         # builds many Raws from this Info, and used to leave them with no
         # channel positions at all.
-        info.set_montage(make_standard_montage("standard_1020"), on_missing="ignore")
+        info.set_montage(make_standard_montage("colin27_1020"), on_missing="ignore")
 
         if not ds.code == "Cattan2019-VR":
             raw = mne.io.RawArray(data=X, info=info, verbose=False)
@@ -258,7 +258,15 @@ def _bi_data_path(  # noqa: C901
     if ds.code == "BrainInvaders2012":
         # check if has the .zip
         url = f"{BI2012a_URL}subject_{subject:02}.zip"
-        path_zip = dl.data_dl(url, "BRAININVADERS2012")
+        path_zip = str(dl.data_dl_destination(url, "BRAININVADERS2012"))
+        planned = path_zip.strip(f"subject_{subject:02}.zip")
+        needed = [
+            osp.join(f"{planned}subject_{subject:02}", name)
+            for name, wanted in (("training.mat", ds.training), ("online.mat", ds.online))
+            if wanted
+        ]
+        if not dl.fill_from_store(osp.dirname(path_zip), needed):
+            path_zip = dl.data_dl(url, "BRAININVADERS2012")
         path_folder = path_zip.strip(f"subject_{subject:02}.zip")
 
         # check if has to unzip
@@ -286,12 +294,32 @@ def _bi_data_path(  # noqa: C901
         else:
             zipname_list = [f"subject{subject:02}.zip"]
 
+        # The NEMAR deposit keeps the extracted runs (subject_NN/Session*/
+        # *.mat + meta.yml); place them before asking for any session ZIP.
+        # fill_tree_from_store is all-or-nothing over the files it holds, so
+        # a partial deposit falls through to the ZIPs below.
+        dest0 = str(
+            dl.data_dl_destination(BI2013a_URL + zipname_list[0], "BRAININVADERS2013")
+        )
+        folder0 = dest0.strip(zipname_list[0])
+        dl.fill_tree_from_store(folder0, f"subject_{subject:02}")
+
         for i, zipname in enumerate(zipname_list):
             url = BI2013a_URL + zipname
+            # check if has the directory for the subject
+            directory = f"{folder0}subject_{subject:02}"
+            if not (osp.isdir(directory)):
+                os.makedirs(directory)
+
+            # Sessions are 1-based in the deposit/cache; the single-zip
+            # subjects (>7) hold every session under the same tree.
+            if len(zipname_list) == 1:
+                if osp.isfile(osp.join(directory, "meta.yml")):
+                    continue
+            elif osp.isdir(osp.join(directory, f"Session{i + 1}")):
+                continue
             path_zip = dl.data_dl(url, "BRAININVADERS2013")
             path_folder = path_zip.strip(zipname)
-
-            # check if has the directory for the subject
             directory = f"{path_folder}subject_{subject:02}"
             if not (osp.isdir(directory)):
                 os.makedirs(directory)
@@ -332,7 +360,11 @@ def _bi_data_path(  # noqa: C901
 
     elif ds.code == "BrainInvaders2014a":
         url = f"{BI2014a_URL}subject_{subject:02}.zip"
-        path_zip = dl.data_dl(url, "BRAININVADERS2014A")
+        path_zip = str(dl.data_dl_destination(url, "BRAININVADERS2014A"))
+        planned = f"{path_zip.strip(f'subject_{subject:02}.zip')}subject_{subject:02}"
+        needed = [osp.join(planned, f"subject_{subject:02}.mat")]
+        if not dl.fill_from_store(osp.dirname(path_zip), needed):
+            path_zip = dl.data_dl(url, "BRAININVADERS2014A")
         path_folder = path_zip.strip(f"subject_{subject:02}.zip")
 
         # check if has to unzip
@@ -348,7 +380,12 @@ def _bi_data_path(  # noqa: C901
     elif ds.code == "BrainInvaders2014b":
         group = (subject + 1) // 2
         url = f"{BI2014b_URL}group_{group:02}_mat.zip"
-        path_zip = dl.data_dl(url, "BRAININVADERS2014B")
+        path_zip = str(dl.data_dl_destination(url, "BRAININVADERS2014B"))
+        planned = f"{path_zip.strip(f'group_{group:02}_mat.zip')}group_{group:02}"
+        member = 1 if subject % 2 == 1 else 2
+        needed = [osp.join(planned, f"group_{group:02}_sujet_{member:02}.mat")]
+        if not dl.fill_from_store(osp.dirname(path_zip), needed):
+            path_zip = dl.data_dl(url, "BRAININVADERS2014B")
         path_folder = path_zip.strip(f"group_{group:02}_mat.zip")
 
         # check if has to unzip
@@ -374,7 +411,14 @@ def _bi_data_path(  # noqa: C901
     elif ds.code == "BrainInvaders2015a":
         # TODO: possible fusion with 2014a?
         url = f"{BI2015a_URL}subject_{subject:02}_mat.zip"
-        path_zip = dl.data_dl(url, "BRAININVADERS2015A")
+        path_zip = str(dl.data_dl_destination(url, "BRAININVADERS2015A"))
+        planned = f"{path_zip.strip(f'subject_{subject:02}.zip')}subject_{subject:02}"
+        needed = [
+            osp.join(planned, f"subject_{subject:02}_session_{session:02}.mat")
+            for session in [1, 2, 3]
+        ]
+        if not dl.fill_from_store(osp.dirname(path_zip), needed):
+            path_zip = dl.data_dl(url, "BRAININVADERS2015A")
         path_folder = path_zip.strip(f"subject_{subject:02}.zip")
 
         # check if has to unzip
@@ -395,7 +439,12 @@ def _bi_data_path(  # noqa: C901
     elif ds.code == "BrainInvaders2015b":
         # TODO: possible fusion with 2014b?
         url = f"{BI2015b_URL}group_{(subject + 1) // 2:02}_mat.zip"
-        path_zip = dl.data_dl(url, "BRAININVADERS2015B")
+        group = (subject + 1) // 2
+        path_zip = str(dl.data_dl_destination(url, "BRAININVADERS2015B"))
+        planned = f"{path_zip.strip(f'group_{group:02}_mat.zip')}group_{group:02}"
+        needed = [osp.join(planned, f"group_{group:02}_s{i}.mat") for i in range(1, 5)]
+        if not dl.fill_from_store(osp.dirname(path_zip), needed):
+            path_zip = dl.data_dl(url, "BRAININVADERS2015B")
         path_folder = path_zip.strip(f"group_{(subject + 1) // 2:02}_mat.zip")
         # check if has to unzip
         path_folder_subject = f"{path_folder}group_{(subject + 1) // 2:02}"
@@ -505,9 +554,11 @@ class BI2012(BaseDataset):
             age_min=21,
             age_max=31,
             bci_experience="half played games occasionally (around 4.5 hours a week)",
-            species="human",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
+            trial_duration=1.0,
+            task_type="brain_invaders",
             paradigm="p300",
             study_design="longitudinal and transversal design with training-test mode of operation",
             feedback_type="visual (game interface)",
@@ -617,7 +668,7 @@ class BI2012(BaseDataset):
             code="BrainInvaders2012",
             interval=[0, 1],
             paradigm="p300",
-            doi="https://doi.org/10.5281/zenodo.2649006",
+            doi="10.5281/zenodo.2649006",
             selected_subjects=subjects,
             selected_sessions=sessions,
             return_all_modalities=return_all_modalities,
@@ -671,7 +722,7 @@ class BI2013a(BaseDataset):
     must be used for quantifying the performance of classification methods
     (e.g., balanced accuracy, AUC methods, etc).
 
-    Data were acquired with a Nexus (TMSi, The Netherlands) EEG amplifier:
+    Data were acquired with a g.USBamp (g.tec, Schiedlberg, Austria) EEG amplifier:
 
     * Sampling Frequency: 512 samples per second
     * Digital Filter: no
@@ -679,7 +730,7 @@ class BI2013a(BaseDataset):
       FP1, FP2, F5, AFz, F6, T7, Cz, T8, P7, P3, Pz, P4, P8, O1, Oz, O2
       according to the 10/20 international system.
     * Reference: left ear-lobe.
-    * Ground: N/A.
+    * Ground: FZ.
 
     :Principal Investigators: Erwan Vaineau, Dr. Alexandre Barachant
     :Scientific Supervisor:  Dr. Marco Congedo
@@ -748,7 +799,7 @@ class BI2013a(BaseDataset):
             age_std=4.46,
             age_min=20.0,
             age_max=30.0,
-            species="human",
+            species="homo sapiens",
             bci_experience="volunteers recruited via flyers and university mailing list",
         ),
         experiment=ExperimentMetadata(
@@ -757,7 +808,7 @@ class BI2013a(BaseDataset):
             events={"Target": 33285, "NonTarget": 33286},
             n_classes=2,
             class_labels=["Target", "NonTarget"],
-            trial_duration=None,
+            trial_duration=1.0,
             study_design="compare P300-based BCI with and without adaptive calibration using Riemannian geometry; randomised order of runs (adaptive vs non-adaptive)",
             feedback_type="visual (Brain Invaders video game interface)",
             stimulus_type="visual flashes",
@@ -789,7 +840,7 @@ class BI2013a(BaseDataset):
             data_url="https://doi.org/10.5281/zenodo.1494163",
             publication_year=2019,
             senior_author="M. Congedo",
-            associated_paper_doi="10.5281/zenodo.2649006",
+            associated_paper_doi="hal-02103098",
             institution_address="GIPSA-lab, 11 rue des Mathématiques, Grenoble Campus BP46, F-38402, France",
             ethics_approval=[
                 "Approved by the Ethical Committee of the University of Grenoble Alpes (Comité d'Ethique pour la Recherche Non-Interventionnelle)"
@@ -885,7 +936,7 @@ class BI2013a(BaseDataset):
             code="BrainInvaders2013a",
             interval=[0, 1],
             paradigm="p300",
-            doi="https://doi.org/10.5281/zenodo.2669187",
+            doi="10.5281/zenodo.1494163",
             selected_subjects=subjects,
             selected_sessions=sessions,
             return_all_modalities=return_all_modalities,
@@ -909,13 +960,20 @@ class BI2013a(BaseDataset):
 class BI2014a(BaseDataset):
     """P300 dataset BI2014a from a "Brain Invaders" experiment.
 
-    This dataset contains electroencephalographic (EEG) recordings of 71 subjects
-    playing to a visual P300 Brain-Computer Interface (BCI) videogame named Brain Invaders.
+    This dataset contains electroencephalographic (EEG) recordings of 64 subjects
+    (out of the 71 recruited: participants 65-71 are not distributed because of tagging
+    issues or aborted experiments, see [1]_) playing to a visual P300 Brain-Computer
+    Interface (BCI) videogame named Brain Invaders.
     The interface uses the oddball paradigm on a grid of 36 symbols (1 Target, 35 Non-Target)
     that are flashed pseudo-randomly to elicit the P300 response. EEG data were recorded
     using 16 active dry electrodes with up to three game sessions. The experiment took place
     at GIPSA-lab, Grenoble, France, in 2014. A full description of the experiment is available
     at [1]_. The ID of this dataset is BI2014a.
+
+    The release distributes a single ``subject_XX.mat`` file per subject, which
+    the loader returns as one session (``"0"``) with one run, hence
+    ``sessions_per_subject=1`` regardless of the number of game sessions
+    played.
 
     :Investigators: Eng. Louis Korczowski, B. Sc. Ekaterina Ostaschenko
     :Technical Support: Eng. Anton Andreev, Eng. Grégoire Cattan, Eng. Pedro. L. C. Rodrigues,
@@ -975,20 +1033,22 @@ class BI2014a(BaseDataset):
         ),
         participants=ParticipantMetadata(
             n_subjects=64,
-            gender={"male": 49, "female": 22},
+            gender={"male": 43, "female": 21},
             age_mean=23.55,
             age_std=3.13,
+            age_min=19.0,
+            age_max=35.0,
             health_status="healthy",
             bci_experience="57 were naïve BCI participants",
             handedness="not specified",
-            species="human",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             paradigm="p300",
             task_type="oddball",
             n_classes=2,
-            class_labels=["Target", "Non-Target"],
-            trial_duration=None,
+            class_labels=["Target", "NonTarget"],
+            trial_duration=1.0,
             study_design="calibration-less P300-based BCI system with dry electrodes; screening session for potential candidates for a broader multi-user BCI study",
             feedback_type="visual",
             stimulus_type="visual flashes",
@@ -1090,7 +1150,7 @@ class BI2014a(BaseDataset):
             code="BrainInvaders2014a",
             interval=[0, 1],
             paradigm="p300",
-            doi="https://doi.org/10.5281/zenodo.3266222",
+            doi="10.5281/zenodo.3266223",
             selected_subjects=subjects,
             selected_sessions=sessions,
             return_all_modalities=return_all_modalities,
@@ -1117,6 +1177,11 @@ class BI2014b(BaseDataset):
     electrodes per subjects (total: 64 electrodes) during three randomized conditions
     (Solo1, Solo2, Collaboration). The experiment took place at GIPSA-lab, Grenoble, France, in 2014.
     A full description of the experiment is available at [1]_. The ID of this dataset is BI2014b.
+
+    The loader reads one ``group_XX_sujet_0N.mat`` file per subject (the solo
+    recording of that participant) and returns it as a single session
+    (``"0"``) with one run; the collaborative-condition recording is not
+    loaded. ``sessions_per_subject`` is therefore 1.
 
     :Investigators: Eng. Louis Korczowski, B. Sc. Ekaterina Ostaschenko
     :Technical Support: Eng. Anton Andreev, Eng. Grégoire Cattan, Eng. Pedro. L. C. Rodrigues,
@@ -1194,8 +1259,10 @@ class BI2014b(BaseDataset):
             gender={"male": 24, "female": 14},
             age_mean=24.10,
             age_std=3.09,
+            age_min=19.0,
+            age_max=35.0,
             bci_experience="not naïve users - selected on the basis of their individual score during a preliminary session of Brain Invaders",
-            species="human",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             paradigm="p300",
@@ -1203,7 +1270,7 @@ class BI2014b(BaseDataset):
             events={"Target": 2, "NonTarget": 1},
             n_classes=2,
             class_labels=["Target", "NonTarget"],
-            trial_duration=None,
+            trial_duration=1.0,
             study_design="multi-user/hyperscanning experiment with three randomized conditions (Solo1, Solo2, Collaboration). Subjects played in pairs. Solo conditions used a control design where non-playing participant focused on unanimated cross to prevent stimulus observation while EEG was recorded (to correct for fake inter-brain synchrony).",
             study_domain="inter-brain synchrony in collaborative BCI",
             feedback_type="visual",
@@ -1301,7 +1368,7 @@ class BI2014b(BaseDataset):
             code="BrainInvaders2014b",
             interval=[0, 1],
             paradigm="p300",
-            doi="https://doi.org/10.5281/zenodo.3267301",
+            doi="10.5281/zenodo.3267301",
             selected_subjects=subjects,
             selected_sessions=sessions,
             return_all_modalities=return_all_modalities,
@@ -1328,7 +1395,10 @@ class BI2015a(BaseDataset):
     32 active wet electrodes with three conditions: flash duration 50ms, 80ms
     or 110ms. The experiment took place at GIPSA-lab, Grenoble, France, in 2015.
     A full description of the experiment is available at [1]_. The ID of this
-    dataset is BI2015a.
+    dataset is BI2015a. Although 50 subjects were recruited, the Zenodo record only
+    distributes subjects 1-43; participants 44-50 are listed in the report's Table 1
+    with recording problems (NaN values, powering issue, no visible alpha) and are
+    not available.
 
     :Investigators: Eng. Louis Korczowski, B. Sc. Martine Cederhout
     :Technical Support: Eng. Anton Andreev, Eng. Grégoire Cattan, Eng. Pedro. L. C. Rodrigues,
@@ -1406,11 +1476,14 @@ class BI2015a(BaseDataset):
             gender={"male": 31, "female": 12},
             age_mean=23.70,
             age_std=3.19,
+            age_min=18.0,
+            age_max=32.0,
             health_status="healthy",
             bci_experience="mostly students and young researchers",
             species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
+            trial_duration=1.0,
             events={"Target": 2, "NonTarget": 1},
             paradigm="p300",
             study_design="calibration-less P300-based BCI with modulation of flash duration; three game sessions (9 levels each) with different flash durations (110ms, 80ms, 50ms); resting state and eyes closed recorded before and after sessions; subjects instructed to limit eye blinks, head movements and face muscular contractions",
@@ -1420,7 +1493,7 @@ class BI2015a(BaseDataset):
             mode="online",
             stimulus_type="oddball paradigm on grid of 36 symbols (1 Target, 35 Non-Target) flashed pseudo-randomly",
             n_classes=2,
-            class_labels=["Target", "Non-Target"],
+            class_labels=["Target", "NonTarget"],
             synchronicity="synchronous",
             task_type="target detection",
             instructions="destroy target symbol within 8 attempts; aliens move slowly and regularly according to predefined path to maintain attention",
@@ -1498,7 +1571,7 @@ class BI2015a(BaseDataset):
             code="BrainInvaders2015a",
             interval=[0, 1],
             paradigm="p300",
-            doi="https://doi.org/10.5281/zenodo.3266929",
+            doi="10.5281/zenodo.3266930",
             selected_subjects=subjects,
             selected_sessions=sessions,
             return_all_modalities=return_all_modalities,
@@ -1526,9 +1599,13 @@ class BI2015b(BaseDataset):
     per subjects (total: 64 electrodes) during four randomised conditions
     (Cooperation 1-Target, Cooperation 2-Targets, Competition 1-Target,
     Competition 2-Targets). The experiment took place at GIPSA-lab, Grenoble,
-    France, in 2015. A full description of the experiment is available at
-    A full description of the experiment is available at [1]_. The ID of this
-    dataset is BI2015a.
+    France, in 2015. A full description of the experiment is available at [1]_.
+    The ID of this dataset is BI2015b.
+
+    The four conditions are released as four recordings per pair of subjects
+    (``group_XX_s1.mat`` ... ``group_XX_s4.mat``); MOABB exposes them as one
+    session with four runs per subject. Participant demographics are not
+    given in the Zenodo record (see [1]_ for the full description).
 
     :Investigators: Eng. Louis Korczowski, B. Sc. Martine Cederhout
     :Technical Support: Eng. Anton Andreev, Eng. Grégoire Cattan, Eng. Pedro. L. C. Rodrigues,
@@ -1546,7 +1623,8 @@ class BI2015b(BaseDataset):
     .. [1] Korczowski, L., Cederhout, M., Andreev, A., Cattan, G., Rodrigues, P. L. C.,
            Gautheret, V., & Congedo, M. (2019). Brain Invaders Cooperative versus Competitive:
            Multi-User P300-based Brain-Computer Interface Dataset (BI2015b)
-           https://hal.archives-ouvertes.fr/hal-02172347
+           https://hal.archives-ouvertes.fr/hal-02173913
+           Data: https://doi.org/10.5281/zenodo.3267307
     """
 
     nemar_id = "nm000217"
@@ -1602,31 +1680,25 @@ class BI2015b(BaseDataset):
             filters="no digital filter applied",
         ),
         participants=ParticipantMetadata(
-            n_subjects=50,
-            health_status="Healthy",
-            gender={"male": 36, "female": 14},
-            age_mean=23.70,
-            age_std=3.19,
-            bci_experience="mostly students and young researchers",
-            species="human",
+            n_subjects=44, health_status="Healthy", species="homo sapiens"
         ),
         experiment=ExperimentMetadata(
+            trial_duration=1.0,
             paradigm="p300",
-            events={"Target": 1, "Non-Target": 2},
+            events={"Target": 2, "NonTarget": 1},
             n_classes=2,
-            class_labels=["Target", "Non-Target"],
-            study_design="Three game sessions with different flash durations (110ms, 80ms, 50ms), with resting state and eyes closed conditions recorded before and after. Subjects were instructed to limit eye blinks, head movements and face muscular contractions.",
+            class_labels=["Target", "NonTarget"],
+            study_design="Subjects played in pairs to the multi-user version of Brain Invaders during four randomised conditions (Cooperation 1-Target, Cooperation 2-Targets, Competition 1-Target, Competition 2-Targets). The interface uses the oddball paradigm on a grid of 36 symbols (1 or 2 Target, 35 or 34 Non-Target).",
             feedback_type="visual (game interface with reward screen)",
             stimulus_type="visual flash",
             stimulus_modalities=["visual"],
             primary_modality="visual",
             mode="online",
-            instructions="Players had up to eight attempts to destroy the target symbol per level. Target symbol identification using oddball paradigm with 36 aliens flashing in pseudo-random groups of six symbols.",
             has_training_test_split=False,
         ),
         documentation=DocumentationMetadata(
-            doi="10.5281/zenodo.3266930",
-            description="EEG recordings of 50 subjects playing to a visual P300 Brain-Computer Interface (BCI) videogame named Brain Invaders. The interface uses the oddball paradigm on a grid of 36 symbols (1 Target, 35 Non-Target) that are flashed pseudo-randomly to elicit the P300 response. Three conditions: flash duration 50ms, 80ms or 110ms.",
+            doi="10.5281/zenodo.3267307",
+            description="EEG recordings of 44 subjects playing in pair to the multi-user version of a visual P300 Brain-Computer Interface (BCI) named Brain Invaders. The interface uses the oddball paradigm on a grid of 36 symbols (1 or 2 Target, 35 or 34 Non-Target) that are flashed pseudo-randomly to elicit the P300 response. Four randomised conditions: Cooperation 1-Target, Cooperation 2-Targets, Competition 1-Target, Competition 2-Targets.",
             investigators=[
                 "Louis Korczowski",
                 "Martine Cederhout",
@@ -1637,12 +1709,12 @@ class BI2015b(BaseDataset):
                 "Marco Congedo",
             ],
             institution="GIPSA-lab, CNRS, University Grenoble-Alpes, Grenoble INP",
-            country="France",
+            country="FR",
             repository="Zenodo",
-            data_url="https://doi.org/10.5281/zenodo.3266930",
+            data_url="https://doi.org/10.5281/zenodo.3267307",
             publication_year=2019,
             senior_author="Marco Congedo",
-            associated_paper_doi="hal-02172347",
+            associated_paper_doi="hal-02173913",
             institution_address="GIPSA-lab, 11 rue des Mathématiques, Grenoble Campus BP46, F-38402, France",
             ethics_approval=[
                 "Ethical Committee of the University of Grenoble Alpes (Comité d'Ethique pour la Recherche Non-Interventionnelle)"
@@ -1655,7 +1727,7 @@ class BI2015b(BaseDataset):
             ],
             license="CC-BY-4.0",
         ),
-        sessions_per_subject=3,
+        sessions_per_subject=1,
         runs_per_session=4,
         contributing_labs=["GIPSA-lab"],
         n_contributing_labs=1,
@@ -1675,25 +1747,18 @@ class BI2015b(BaseDataset):
             ],
             feature_extraction=["Covariance/Riemannian", "xDAWN"],
         ),
-        cross_validation=CrossValidationMetadata(evaluation_type=["cross_session"]),
+        cross_validation=CrossValidationMetadata(evaluation_type=["within_session"]),
         bci_application=BCIApplicationMetadata(
-            applications=["gaming"],
-            environment="small room with a surface of four meters square, containing a 24' screen",
-            online_feedback=True,
+            applications=["gaming"], online_feedback=True
         ),
-        paradigm_specific=ParadigmSpecificMetadata(
-            detected_paradigm="p300", n_targets=1, n_repetitions=12, soa_ms=None
-        ),
+        paradigm_specific=ParadigmSpecificMetadata(detected_paradigm="p300"),
         data_structure=DataStructureMetadata(
-            n_trials="variable per subject (up to 8 attempts per level, 9 levels per session, 3 sessions)",
-            n_blocks=9,
-            trials_context="per session (9 levels per session, 3 sessions with different flash durations)",
+            n_trials="variable per subject (four conditions recorded as four runs)",
+            n_blocks=4,
+            trials_context="per subject (four randomised conditions: Cooperation 1-Target, Cooperation 2-Targets, Competition 1-Target, Competition 2-Targets)",
         ),
-        performance={
-            "note": "Real-time adaptive classifier used during experiment, performance variable per subject"
-        },
-        abstract="We describe the experimental procedures for an experiment dataset that we have made publicly available at https://doi.org/10.5281/zenodo.3266930 in mat and csv formats. This dataset contains electroencephalographic (EEG) recordings of 50 subjects playing to a visual P300 Brain-Computer Interface (BCI) videogame named Brain Invaders. The interface uses the oddball paradigm on a grid of 36 symbols (1 Target, 35 Non-Target) that are flashed pseudo-randomly to elicit the P300 response. EEG data were recorded using 32 active wet electrodes with three conditions: flash duration 50ms, 80ms or 110ms. The experiment took place at GIPSA-lab, Grenoble, France, in 2015.",
-        methodology="The experiment consisted of three game sessions of Brain Invaders of 9 levels each with different flash duration (110ms, 80ms, 50ms). Before and after the three game sessions, around one minute of resting state and eyes closed conditions were recorded. The interface is composed of 36 aliens. A repetition is composed of 12 flashes of pseudo-random groups of six symbols chosen in such a way that after each repetition each symbol has flashed exactly two times. The ratio of Target versus non-Target is one-to-five. During the experiment, the output of a real-time adaptive Riemannian Minimum Distance to Mean (RMDM) classifier was used for assessing the participants' command. This scheme allows a calibration-free classifier.",
+        abstract="This dataset contains electroencephalographic (EEG) recordings of 44 subjects playing in pair to the multi-user version of a visual P300 Brain-Computer Interface (BCI) named Brain Invaders. The interface uses the oddball paradigm on a grid of 36 symbols (1 or 2 Target, 35 or 34 Non-Target) that are flashed pseudo-randomly to elicit the P300 response. EEG data were recorded using 32 active wet electrodes per subjects (total: 64 electrodes) during four randomised conditions (Cooperation 1-Target, Cooperation 2-Targets, Competition 1-Target, Competition 2-Targets). The experiment took place at GIPSA-lab, Grenoble, France, in 2015.",
+        methodology="Pairs of subjects played the multi-user version of Brain Invaders under four randomised conditions (Cooperation 1-Target, Cooperation 2-Targets, Competition 1-Target, Competition 2-Targets), each released as one recording. EEG data were recorded using 32 active wet electrodes per subject (total: 64 electrodes). See https://hal.archives-ouvertes.fr/hal-02173913 for the full description of the experiment.",
     )
 
     def __init__(self, subjects=None, sessions=None, *, return_all_modalities=False):
@@ -1704,7 +1769,7 @@ class BI2015b(BaseDataset):
             code="BrainInvaders2015b",
             interval=[0, 1],
             paradigm="p300",
-            doi="https://doi.org/10.5281/zenodo.3267307",
+            doi="10.5281/zenodo.3267307",
             selected_subjects=subjects,
             selected_sessions=sessions,
             return_all_modalities=return_all_modalities,
@@ -1742,7 +1807,7 @@ class Cattan2019_VR(BaseDataset):
 
     Parameters
     ----------
-    virtual_reality: bool (default False)
+    virtual_reality: bool (default True)
         if True, return runs corresponding to P300 experiment on virtual reality.
     screen_display: bool (default True)
         if True, return runs corresponding to P300 experiment on personal computer.
@@ -1809,8 +1874,8 @@ class Cattan2019_VR(BaseDataset):
             paradigm="p300",
             events={"Target": 2, "NonTarget": 1},
             n_classes=2,
-            class_labels=["target", "non_target"],
-            trial_duration=None,
+            class_labels=["Target", "NonTarget"],
+            trial_duration=1.0,
             study_design="randomized session order (PC vs VR); limit eye blinks, head movements and face muscular contractions",
             feedback_type="visual",
             stimulus_type="flashing white crosses in 6x6 matrix",
@@ -1882,7 +1947,7 @@ class Cattan2019_VR(BaseDataset):
             online_feedback=False,
         ),
         paradigm_specific=ParadigmSpecificMetadata(
-            detected_paradigm="p300", n_targets=1, n_repetitions=12
+            detected_paradigm="p300", n_targets=1, n_repetitions=5
         ),
         data_structure=DataStructureMetadata(
             n_trials={"target": 120, "non_target": 600},
@@ -1916,12 +1981,14 @@ class Cattan2019_VR(BaseDataset):
         self.n_repetitions = 5
         super().__init__(
             subjects=list(range(1, 21 + 1)),
-            sessions_per_subject=1,
+            # One session per display condition: ``0VR`` (virtual reality) and
+            # ``1PC`` (screen), as returned by ``_get_single_subject_data``.
+            sessions_per_subject=2,
             events={"Target": 2, "NonTarget": 1},
             code="Cattan2019-VR",  # before: "VR-P300"
             interval=[0, 1.0],
             paradigm="p300",
-            doi="https://doi.org/10.5281/zenodo.2605204",
+            doi="10.5281/zenodo.2605204",
             selected_subjects=subjects,
             selected_sessions=sessions,
             return_all_modalities=return_all_modalities,

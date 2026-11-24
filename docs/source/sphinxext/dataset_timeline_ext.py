@@ -469,8 +469,11 @@ def _get_dataset_info(obj):
             except Exception:
                 hed_tags = hed_tags or None
 
+        from moabb.analysis.timeline import _is_motor_execution
+
         return {
             "paradigm": paradigm,
+            "is_motor_execution": _is_motor_execution(metadata, ds),
             "n_subjects": n_subjects,
             "default_subject": default_subject,
             "n_sessions": n_sessions,
@@ -1480,7 +1483,11 @@ def _make_header_html(
 ):
     """Build the enhanced dataset card HTML (Layer 1)."""
     paradigm = info.get("paradigm") or "unknown"
-    label = _PARADIGM_LABELS.get(paradigm, paradigm.title())
+    label = (
+        "Motor Execution"
+        if info.get("is_motor_execution")
+        else _PARADIGM_LABELS.get(paradigm, paradigm.title())
+    )
     color = _PARADIGM_COLORS.get(paradigm, "#546E7A")
     n_subj = info.get("n_subjects")
     n_sess = info.get("n_sessions")
@@ -1708,7 +1715,11 @@ def _make_visual_grid_lines(cls_name, info, srcdir, docstring_lines=None):
     """Build RST lines for the adaptive visual summary grid."""
     lines = []
     paradigm = info.get("paradigm") or "unknown"
-    paradigm_label = _PARADIGM_LABELS.get(paradigm, paradigm.title())
+    paradigm_label = (
+        "Motor Execution"
+        if info.get("is_motor_execution")
+        else _PARADIGM_LABELS.get(paradigm, paradigm.title())
+    )
     n_classes = info.get("n_classes")
     class_labels = info.get("class_labels") or []
     display_n_classes = len(class_labels) if class_labels else n_classes
@@ -2183,6 +2194,8 @@ def autodoc_process_docstring(app, what, name, obj, options, lines):
 
     cls_name = obj.__name__
     info = _get_dataset_info(obj)
+    if not info:
+        return
     source_url = _get_dataset_source_url(obj)
 
     # --- Extract description lines for teaser (before restructuring) ---
@@ -2319,6 +2332,6 @@ def setup(app):
     app.add_config_value("dataset_card_live_citations", True, "html")
     app.add_config_value("dataset_card_generate_svgs", True, "html")
     app.connect("builder-inited", _generate_all_svgs)
-    app.connect("autodoc-process-docstring", autodoc_process_docstring)
+    app.connect("autodoc-process-docstring", autodoc_process_docstring, priority=900)
     app.connect("source-read", source_read_add_inherited)
     return {"version": "1.0", "parallel_read_safe": True}

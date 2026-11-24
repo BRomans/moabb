@@ -67,7 +67,7 @@ class Cattan2019_PHMD(BaseDataset):
         acquisition=AcquisitionMetadata(
             sampling_rate=512.0,
             channel_types={"eeg": 16},
-            montage="standard_1020",
+            montage="standard_1005",
             hardware="g.USBamp",
             sensor_type="wet",
             reference="right earlobe",
@@ -114,9 +114,9 @@ class Cattan2019_PHMD(BaseDataset):
             primary_modality="auditory",
             mode=None,
             instructions="Subjects were asked to focus on the marker and to listen to the music that was diffused during the experiment",
-            events={"switched-off": 1, "switched-on": 2},
+            events={"off": 1, "on": 2},
             n_classes=2,
-            class_labels=["smartphone switched-off", "smartphone switched-on"],
+            class_labels=["off", "on"],
             synchronicity=None,
             feedback_type="none",
             has_training_test_split=False,
@@ -153,6 +153,8 @@ class Cattan2019_PHMD(BaseDataset):
             applications=["vr_ar"], environment="laboratory", online_feedback=False
         ),
         data_structure=DataStructureMetadata(
+            n_trials=10,
+            n_trials_per_class={"off": 5, "on": 5},
             n_blocks=10,
             block_duration_s=60.0,
             trials_context="5 blocks with smartphone switched-off and 5 blocks with smartphone switched-on, randomized sequence",
@@ -215,7 +217,7 @@ class Cattan2019_PHMD(BaseDataset):
             ch_names=self._chnames, sfreq=512, ch_types=self._chtypes, verbose=False
         )
         raw = mne.io.RawArray(data=X, info=info, verbose=False)
-        raw.set_montage("standard_1020")
+        raw.set_montage("colin27_1020")
         return {"0": {"0": raw}}
 
     def data_path(

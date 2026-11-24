@@ -3,6 +3,7 @@
 #
 # License: BSD (3-clause)
 
+import glob
 import logging
 import os
 
@@ -122,6 +123,12 @@ class Stieger2021(BaseDataset):
     the normalized control signals were used to update the position of
     the cursor every 40 ms.
 
+    The paper states no reference or ground. The MAT files' electrode positions
+    (``BCI.chaninfo.electrodes``) list a 63rd electrode, ``REF.``, that is not
+    among the data channels; in subject 1, session 1 it sits midway between Cz
+    and CPz (52% of the way from Cz, 4 mm off that line), the reference
+    position the same lab states for Forenzo2023.
+
     References
     ----------
 
@@ -136,15 +143,16 @@ class Stieger2021(BaseDataset):
     """
 
     nemar_id = "nm000339"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=1000.0,
-            channel_types={"eeg": 62},
+            channel_types={"eeg": 60},
             montage="10-10",
             hardware="Neuroscan SynAmps RT amplifiers",
             sensor_type="EEG",
-            reference=None,
-            software="Neuroscan",
+            reference="between Cz and CPz",
+            software="Neuroscan acquisition software and BCI2000",
             filters="0.1 to 200 Hz with 60 Hz notch filter",
             sensors=[
                 "AF3",
@@ -217,8 +225,8 @@ class Stieger2021(BaseDataset):
             n_subjects=62,
             health_status="healthy",
             gender={"male": 13, "female": 49},
-            age_mean=None,
-            age_std=None,
+            age_mean=39.2,
+            age_std=14.4,
             age_min=18,
             age_max=63,
             handedness="mostly right-handed",
@@ -228,14 +236,14 @@ class Stieger2021(BaseDataset):
             events={"right_hand": 1, "left_hand": 2, "both_hand": 3, "rest": 4},
             paradigm="imagery",
             n_classes=4,
-            class_labels=["right_hand", "left_hand", "both_hands", "rest"],
+            class_labels=["right_hand", "left_hand", "both_hand", "rest"],
             feedback_type="visual",
             stimulus_type="target_bar",
             stimulus_modalities=["visual"],
             primary_modality="visual",
             mode="online",
             has_training_test_split=None,
-            trial_duration=None,
+            trial_duration=3.0,
             instructions="Imagine your left (right) hand opening and closing to move the cursor left (right). Imagine both hands opening and closing to move the cursor up. Finally, to move the cursor down, voluntarily rest; in other words, clear your mind.",
             study_design="longitudinal training study with intervention",
             tasks=["LR", "UD", "2D"],
@@ -263,7 +271,7 @@ class Stieger2021(BaseDataset):
                 "longitudinal",
                 "learning",
             ],
-            repository="GitHub",
+            repository="Figshare",
             data_url="https://doi.org/10.6084/m9.figshare.13123148.v1",
             funding=[
                 "NIH AT009263",
@@ -272,7 +280,7 @@ class Stieger2021(BaseDataset):
                 "NIH MH114233",
                 "NIH EB029354",
             ],
-            license="CC-BY-NC-4.0",
+            license="CC-BY-4.0",
         ),
         tags=Tags(pathology=["Healthy"], modality=["Motor"], type=["Active"]),
         preprocessing=PreprocessingMetadata(
@@ -297,7 +305,13 @@ class Stieger2021(BaseDataset):
             imagery_duration_s=6.0,
         ),
         data_structure=DataStructureMetadata(
-            n_trials=450, n_blocks=18, trials_context="per_session"
+            n_trials=450,
+            n_blocks=6,
+            trials_context=(
+                "per session: 2 blocks of each task (LR, UD, 2D), each block "
+                "3 runs of 25 trials (18 runs, 450 trials); released as one "
+                "file per session, exposed as a single run"
+            ),
         ),
         file_format="MAT",
         sessions_per_subject=11,
@@ -388,6 +402,19 @@ class Stieger2021(BaseDataset):
         path = get_dataset_path(self.code, path)
         basepath = os.path.join(path, f"MNE-{self.code:s}-data")
 
+        # A seeded NEMAR store (or an earlier load) already holds this
+        # subject's session files; the Figshare file list is only needed
+        # to resolve files that are not on disk yet.
+        if not force_update:
+            local = sorted(
+                f
+                for f in glob.glob(os.path.join(basepath, f"S{subject}_Session_*.mat"))
+                if self.sessions is None
+                or int(os.path.basename(f).split("_")[2].split(".")[0]) in self.sessions
+            )
+            if local:
+                return local
+
         file_list = dl.fs_get_file_list(self.figshare_id)
         hash_file_list = dl.fs_get_file_hash(file_list)
         id_file_list = dl.fs_get_file_id(file_list)
@@ -452,7 +479,7 @@ class Stieger2021(BaseDataset):
                 ch.replace("Z", "z").replace("FP", "Fp") for ch in eeg_ch_names
             ]
             # extract all standard EEG channels
-            montage = mne.channels.make_standard_montage("standard_1005")
+            montage = mne.channels.make_standard_montage("colin27_1005")
             channel_mask = np.isin(eeg_ch_names, montage.ch_names)
             ch_names = [ch for ch, found in zip(eeg_ch_names, channel_mask) if found] + [
                 "stim"

@@ -25,6 +25,7 @@ from .metadata.schema import (
     ExperimentMetadata,
     ParadigmSpecificMetadata,
     ParticipantMetadata,
+    PreprocessingMetadata,
     SignalProcessingMetadata,
     Tags,
 )
@@ -83,7 +84,12 @@ class Zheng2020(BaseDataset):
     task across 2 sessions separated by ~23 days. EEG was recorded
     at 1000 Hz from 62 channels using two synchronized Neuroscan
     Synamps2 systems. Each session contains 3 blocks of 14 RSVP
-    trials (100 images at 10 Hz), with 4 target images per trial.
+    trials (100 images at 10 Hz), with 4 target images per trial, i.e.
+    168 target and 4032 non-target images per session ("Each session
+    consisted of three blocks and each block contained 14 trials (1,400
+    images" [1]_). "The reference electrode was at the vertex" [1]_; the
+    common average reference of the paper is an analysis step, not the
+    released data.
 
     Events: Target (image containing a human) = 2,
     NonTarget (no human) = 1.
@@ -98,6 +104,7 @@ class Zheng2020(BaseDataset):
     """
 
     nemar_id = "nm000205"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=1000.0,
@@ -105,6 +112,7 @@ class Zheng2020(BaseDataset):
             montage="standard_1020",
             hardware="Neuroscan Synamps2",
             reference="vertex (Cz)",
+            filters="0.15-200 Hz bandpass, 50 Hz notch",
             sensors=list(_CH_NAMES),
             line_freq=50.0,
         ),
@@ -115,8 +123,8 @@ class Zheng2020(BaseDataset):
             age_mean=24.9,
             age_min=23,
             age_max=29,
-            handedness="all right-handed",
-            species="human",
+            handedness="right",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             events={"Target": 2, "NonTarget": 1},
@@ -133,8 +141,15 @@ class Zheng2020(BaseDataset):
             stimulus_modalities=["visual"],
             primary_modality="visual",
             mode="offline",
+            stimulus_presentation={
+                "SoftwareName": "Psychophysics Toolbox Ver. 3 (PTB-3)"
+            },
         ),
         documentation=DocumentationMetadata(
+            senior_author="Yijun Wang",
+            funding=["National Key R&D Program of China (grant 2017YFA0205903)"],
+            ethics_approval=["Ethics Committee of Tsinghua University"],
+            repository="Figshare",
             doi=_DOI,
             investigators=[
                 "Li Zheng",
@@ -155,12 +170,21 @@ class Zheng2020(BaseDataset):
         sessions_per_subject=2,
         runs_per_session=3,
         tags=Tags(pathology=["Healthy"], modality=["ERP"], type=["RSVP"]),
+        preprocessing=PreprocessingMetadata(
+            data_state="continuous",
+            preprocessing_applied=False,
+            notes="Continuous 62-channel EEG + 1 trigger channel stored at 1000 Hz per block; hardware 0.15-200 Hz bandpass and 50 Hz notch applied during recording.",
+        ),
         paradigm_specific=ParadigmSpecificMetadata(
             detected_paradigm="p300", soa_ms=100.0
         ),
         data_structure=DataStructureMetadata(
             n_trials={"target": 168, "nontarget": 4032},
-            trials_context="per subject across both sessions",
+            trials_context=(
+                "per session: 3 blocks x 14 trials x 100 images, 4 targets per "
+                "trial (168 target + 4032 non-target images); x2 sessions per "
+                "subject"
+            ),
         ),
         signal_processing=SignalProcessingMetadata(
             classifiers=["HDCA"],
@@ -240,7 +264,7 @@ class Zheng2020(BaseDataset):
                 ch_types = ["eeg"] * 62 + ["stim"]
                 info = mne.create_info(ch_names, 1000.0, ch_types)
                 raw = mne.io.RawArray(all_data, info, verbose=False)
-                raw.set_montage("standard_1020", on_missing="warn")
+                raw.set_montage("colin27_1020", on_missing="warn")
 
                 runs[str(block_idx)] = raw
 

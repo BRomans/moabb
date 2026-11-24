@@ -1,8 +1,8 @@
 """Build a custom dataset using subjects from other datasets."""
 
-from sklearn.pipeline import Pipeline
-
+from ...utils import get_download_provider
 from ..base import BaseDataset
+from ..download import active_sourcedata_store
 
 
 class CompoundDataset(BaseDataset):
@@ -98,6 +98,13 @@ class CompoundDataset(BaseDataset):
             assert dataset.paradigm == paradigm
         return paradigm
 
+    def _source_code(self, shopped_subject):
+        return self.subjects_list[shopped_subject - 1][0].code
+
+    def _device(self, shopped_subject, session):
+        dataset, subject, _, _ = self.subjects_list[shopped_subject - 1]
+        return dataset._device(subject, session)
+
     def _with_data_origin(self, data: dict, shopped_subject):
         data_origin = self.subjects_list[shopped_subject - 1]
 
@@ -121,6 +128,8 @@ class CompoundDataset(BaseDataset):
         self.event_id = dataset.event_id
 
         # regenerate the process_pipeline by overriding all `event_id`
+        from sklearn.pipeline import Pipeline
+
         steps = []
         for step in process_pipeline.steps:
             label, op = step
@@ -135,10 +144,25 @@ class CompoundDataset(BaseDataset):
         )
         return self._with_data_origin(data, shopped_subject)
 
+    def _prefetch_nemar_sourcedata(self, subjects, verbose=None):
+        """Prefetch NEMAR sourcedata for each inner dataset."""
+        if not subjects or get_download_provider() == "upstream":
+            return
+        by_dataset = {}
+        for shopped_subject in subjects:
+            dataset, subject, _, _ = self.subjects_list[shopped_subject - 1]
+            by_dataset.setdefault(id(dataset), (dataset, []))[1].append(subject)
+        for dataset, inner_subjects in by_dataset.values():
+            dataset._prefetch_nemar_sourcedata(inner_subjects, verbose=verbose)
+
     def _get_single_subject_data(self, shopped_subject):
         """Return data for a single subject."""
         dataset, subject, sessions, runs = self.subjects_list[shopped_subject - 1]
-        subject_data = dataset._get_single_subject_data(subject)
+        if get_download_provider() != "upstream":
+            dataset._prefetch_nemar_sourcedata([subject])
+        dataset._seed_loader_cache(subject)
+        with active_sourcedata_store(dataset._sourcedata_store()):
+            subject_data = dataset._get_single_subject_data(subject)
         if sessions is None:
             return subject_data
         elif isinstance(sessions, list):
@@ -168,10 +192,14 @@ class CompoundDataset(BaseDataset):
         verbose=None,
     ):
         dataset, subject, _, _ = self.subjects_list[shopped_subject - 1]
-        return dataset.data_path(
-            subject,
-            path=path,
-            force_update=force_update,
-            update_path=update_path,
-            verbose=verbose,
-        )
+        if get_download_provider() != "upstream":
+            dataset._prefetch_nemar_sourcedata([subject])
+        dataset._seed_loader_cache(subject)
+        with active_sourcedata_store(dataset._sourcedata_store(path)):
+            return dataset.data_path(
+                subject,
+                path=path,
+                force_update=force_update,
+                update_path=update_path,
+                verbose=verbose,
+            )

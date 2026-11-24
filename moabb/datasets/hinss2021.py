@@ -27,6 +27,8 @@ from moabb.datasets.metadata.schema import (
 URL = "https://zenodo.org/record/5055046/files/"
 # private dictionary to map events to integers
 _HINNS_EVENTS = {"rs": 1, "easy": 2, "medium": 3, "diff": 4}
+# Sampling rate of the released, epoched EEGLAB files.
+_SFREQ = 250.0
 
 
 class Hinss2021(BaseDataset):
@@ -47,6 +49,11 @@ class Hinss2021(BaseDataset):
     Subsequently, participants undertook 3 tasks of varying difficulty levels
     (i.e., easy, medium, and difficult). The task assignments
     were randomized. For more details, please check [Hinss2021]_ and [Hinss2023]_.
+
+    The released EEGLAB files hold non-overlapping 2 s epochs at 250 Hz
+    (61 EEG channels). The loader concatenates them per session into one
+    continuous recording with one event per epoch, so each trial is exactly one
+    released epoch.
 
     Notes
     -----
@@ -71,13 +78,16 @@ class Hinss2021(BaseDataset):
     nemar_id = "nm000343"
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
-            sampling_rate=500.0,
-            channel_types={"eeg": 62},
+            ground=None,
+            sampling_rate=_SFREQ,
+            channel_types={"eeg": 61},
             montage="standard_1020",
             hardware="ActiCHamp (Brain Products Gmbh)",
+            cap_manufacturer="Brain Products GmbH",
+            cap_model="ActiCap",
             sensor_type="active Ag/AgCl",
             reference="Fpz",
-            software=None,
+            software="LabRecorder (LabStreamingLayer), MATLAB v.2021a, PsychToolBox-3",
             filters=None,
             impedance_threshold_kohm=25,
             sensors=[
@@ -148,15 +158,17 @@ class Hinss2021(BaseDataset):
         ),
         participants=ParticipantMetadata(
             n_subjects=15,
-            gender={"female": 11, "male": 18},
-            age_mean=23.9,
+            gender={"female": 6, "male": 9},
+            age_mean=25.0,
+            age_std=3.20,
             handedness=None,
         ),
         experiment=ExperimentMetadata(
+            trial_duration=1.996,
             events={"rs": 1, "easy": 2, "medium": 3, "diff": 4},
             paradigm="rstate",
             n_classes=4,
-            class_labels=["rest", "easy", "medium", "difficult"],
+            class_labels=["rs", "easy", "medium", "diff"],
             study_design="Passive BCI neuroergonomics dataset with resting state and 3 difficulty levels of MATB-II task (easy, medium, difficult). The MOABB loader provides resting state and MATB conditions only.",
             feedback_type="none",
             stimulus_type="visual display",
@@ -197,18 +209,18 @@ class Hinss2021(BaseDataset):
                 "Scientific Data, 10, 85. https://doi.org/10.1038/s41597-022-01898-y"
             ),
             repository="Zenodo",
-            data_url="https://doi.org/10.5281/zenodo.6874128",
+            data_url="https://doi.org/10.5281/zenodo.5055046",
             license="CC-BY-SA-4.0",
         ),
         tags=Tags(pathology=["Healthy"], modality=["Cognitive"], type=["Research"]),
         preprocessing=PreprocessingMetadata(
-            data_state="raw",
-            preprocessing_applied=False,
+            data_state="epoched",
+            preprocessing_applied=True,
             highpass_hz=None,
             filter_type=None,
             artifact_methods=None,
             re_reference=None,
-            downsampled_to_hz=None,
+            downsampled_to_hz=_SFREQ,
         ),
         signal_processing=SignalProcessingMetadata(
             classifiers=["MDM", "Riemannian"],
@@ -227,11 +239,13 @@ class Hinss2021(BaseDataset):
         ),
         paradigm_specific=ParadigmSpecificMetadata(detected_paradigm="rstate"),
         data_structure=DataStructureMetadata(
-            n_trials=90, n_blocks=None, trials_context="total"
+            n_trials=960,
+            n_blocks=None,
+            trials_context="480 2-second epochs per session (30 RS + 150 MATBeasy + 150 MATBmed + 150 MATBdiff) x 2 sessions",
         ),
         sessions_per_subject=2,
         runs_per_session=1,
-        data_processed=False,
+        data_processed=True,
         file_format="set",
     )
 
@@ -241,7 +255,10 @@ class Hinss2021(BaseDataset):
             sessions_per_subject=2,  # 2 sessions per subject
             events=_HINNS_EVENTS,
             code="Hinss2021",
-            interval=[0, 2],  # Epochs are 2-second long
+            # The released files hold 2 s epochs at 250 Hz (tmin 0, tmax 1.996),
+            # laid back to back here. MNE epochs include ``tmax``, so stop one
+            # sample early to keep exactly one source epoch per trial.
+            interval=[0, 2 - 1 / _SFREQ],
             paradigm="rstate",
             doi="10.1038/s41597-022-01898-y",
             selected_subjects=subjects,
@@ -252,7 +269,10 @@ class Hinss2021(BaseDataset):
         n_epochs_rs = rs_epochs.get_data().shape[0]
         n_epochs_easy = easy_epochs.get_data().shape[0]
         n_epochs_med = med_epochs.get_data().shape[0]
-        stim = np.zeros((1, n_epochs * n_samples))
+        # The signal carries one leading padding sample (see
+        # ``_get_single_subject_data``), so epoch ``i`` starts at sample
+        # ``n_samples * i + 1``.
+        stim = np.zeros((1, n_epochs * n_samples + 1))
         for i in range(n_epochs):
             stim[0, n_samples * i + 1] = (
                 _HINNS_EVENTS["rs"]
@@ -312,6 +332,11 @@ class Hinss2021(BaseDataset):
             raw_data = raw_data.transpose((1, 0, 2))
             n_channel, n_epochs, n_samples = raw_data.shape
             raw_data = raw_data.reshape((n_channel, n_epochs * n_samples))
+            # Prepend one zero sample: mne.find_events skips an event on the
+            # first sample, and without the padding each marker sat one sample
+            # after its epoch's start, so every trial took one sample of the
+            # next epoch and the last trial of each session ran past the end.
+            raw_data = np.concatenate((np.zeros((n_channel, 1)), raw_data), axis=1)
 
             # add stim channel
             stim = self._get_stim_channel(
@@ -323,8 +348,11 @@ class Hinss2021(BaseDataset):
             self._chnames = rs_epochs.ch_names + ["stim"]
             self._chtypes = ["eeg"] * (raw_data.shape[0] - 1) + ["stim"]
 
+            # The epoched files are downsampled to 250 Hz (the 500 Hz recording
+            # rate only applies to the raw resting-state file, not used here).
+            sfreq = rs_epochs.info["sfreq"]
             info = mne.create_info(
-                ch_names=self._chnames, sfreq=500, ch_types=self._chtypes, verbose=False
+                ch_names=self._chnames, sfreq=sfreq, ch_types=self._chtypes, verbose=False
             )
             raw = mne.io.RawArray(raw_data, info)
 
@@ -342,13 +370,27 @@ class Hinss2021(BaseDataset):
         # check if has the .zip
         url = f"{URL}P{subject:02}.zip"
 
-        path_zip = dl.data_dl(
-            url,
-            "Neuroergonomics2021",
-            path=path,
-            force_update=force_update,
-            verbose=verbose,
-        )
+        path_zip = str(dl.data_dl_destination(url, "Neuroergonomics2021", path=path))
+        # The members _get_single_subject_data reads.
+        needed = [
+            osp.join(
+                osp.dirname(path_zip),
+                f"P{subject:02}",
+                f"S{session}",
+                "eeg",
+                f"alldata_sbj{subject:02}_sess{session}_{task}.set",
+            )
+            for session in range(1, self.n_sessions + 1)
+            for task in ("RS", "MATBeasy", "MATBmed", "MATBdiff")
+        ]
+        if force_update or not dl.fill_from_store(osp.dirname(path_zip), needed):
+            path_zip = dl.data_dl(
+                url,
+                "Neuroergonomics2021",
+                path=path,
+                force_update=force_update,
+                verbose=verbose,
+            )
         path_folder = path_zip.strip(f"P{subject:02}.zip")
 
         # check if has to unzip

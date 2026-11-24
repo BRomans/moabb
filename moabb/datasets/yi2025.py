@@ -111,7 +111,12 @@ class Yi2025(BaseDataset):
     Raw Neuroscan ``.cnt`` files are loaded from the ``FineMI.zip``
     archive on Figshare (~14.2 GB). Auxiliary channels (M1, M2, HEO,
     VEO, EKG, EMG) are dropped, leaving 62 EEG channels. Each block
-    is loaded as a separate run.
+    file is loaded as a separate run, so ``runs_per_session=8`` is the
+    maximum: "the first four blocks of EEG data from subject 1 were saved
+    in one file, while the EEG data of each block from other subjects were
+    saved in different files separately" [1]_, i.e. subject 1 yields fewer
+    (longer) runs. The paper also reports that "The left mastoid (M1) was
+    employed as the reference during the EEG measurements" [1]_.
 
     .. note::
 
@@ -130,6 +135,7 @@ class Yi2025(BaseDataset):
     """
 
     nemar_id = "nm000160"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=1000.0,
@@ -146,7 +152,7 @@ class Yi2025(BaseDataset):
             age_min=22,
             age_max=27,
             health_status="healthy",
-            species="human",
+            species="homo sapiens",
             handedness="right",
             bci_experience="naive",
         ),
@@ -168,6 +174,16 @@ class Yi2025(BaseDataset):
             feedback_type="none",
         ),
         documentation=DocumentationMetadata(
+            senior_author="Jin Qian",
+            funding=[
+                "Natural Science Foundation of China (Grant 62006014, U2441253, 12275295)",
+                "China Postdoctoral Science Foundation (Grant GZC20231910)",
+                "Project of Construction and Support for High-level Teaching Teams of Beijing Municipal Institutions",
+            ],
+            ethics_approval=[
+                "Ethical Committee of Tianjin University (approved number: TJUE-210)"
+            ],
+            repository="Figshare",
             doi="10.1038/s41597-025-05286-0",
             investigators=[
                 "Weibo Yi",
@@ -183,6 +199,7 @@ class Yi2025(BaseDataset):
             country="CN",
             data_url="https://figshare.com/articles/dataset/Data/24123303",
             publication_year=2025,
+            contact_info=["yiweibo1987@163.com", "wangdan@bjut.edu.cn"],
             license="CC-BY-NC-ND-4.0",
         ),
         sessions_per_subject=1,

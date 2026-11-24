@@ -149,7 +149,7 @@ class BaseMAMEM(BaseDataset):
                 m = loadmat(fpath)
                 ch_names = [e[0] for e in m["info"][0, 0][9][0]]
                 sfreq = 128
-                montage = make_standard_montage("standard_1020")
+                montage = make_standard_montage("colin27_1020")
                 eeg = m["eeg"][:-1] * 1e-6
                 stim = np.expand_dims(np.round(m["eeg"][-1], 0).astype(int), 0)
                 eeg = np.concatenate([eeg, stim], axis=0)
@@ -318,6 +318,11 @@ class MAMEM1(BaseMAMEM):
     mimic the stimulation frequency and still be small enough for making a
     selection in the context
 
+    The arXiv report and the PhysioNet record do not state the recording
+    reference. EGI HydroCel Geodesic Sensor Nets record against the vertex
+    electrode (Cz), which is not among the 256 channels; MAMEM2 uses the same
+    system.
+
     References
     ----------
     .. [1] Oikonomou, V. P., Liaros, G., Georgiadis, K., Chatzilari, E., Adam, K.,
@@ -331,6 +336,7 @@ class MAMEM1(BaseMAMEM):
     """
 
     nemar_id = "nm000119"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=250.0,
@@ -338,7 +344,7 @@ class MAMEM1(BaseMAMEM):
             montage="GSN-HydroCel-256",
             hardware="EGI 300 Geodesic EEG System (GES 300)",
             sensor_type=None,
-            reference=None,
+            reference="Cz",
             software=None,
             filters=None,
             sensors=[
@@ -611,28 +617,43 @@ class MAMEM1(BaseMAMEM):
             gender={"male": 8, "female": 3},
             age_min=24,
             age_max=39,
+            age_mean=30.4,
+            age_std=5.2,
             ages=[24, 37, 39, 31, 27, 28, 26, 31, 29, 37, 25],
-            handedness={"right": 10, "left": 1},
-            handedness_list=[
-                "Right",
-                "Right",
-                "Right",
-                "Right",
-                "Left",
-                "Right",
-                "Right",
-                "Right",
-                "Right",
-                "Right",
-                "Right",
+            sexes=[
+                "male",
+                "male",
+                "male",
+                "male",
+                "female",
+                "female",
+                "male",
+                "female",
+                "male",
+                "male",
+                "male",
             ],
-            clinical_population="able-bodied subjects without any known neuro-muscular or mental disorders",
-            species="human",
+            handedness={"right": 8, "left": 3},
+            handedness_list=[
+                "right",
+                "right",
+                "right",
+                "right",
+                "left",
+                "right",
+                "right",
+                "right",
+                "right",
+                "left",
+                "left",
+            ],
+            clinical_population=None,
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             paradigm="ssvep",
             n_classes=5,
-            class_labels=["6.66 Hz", "7.50 Hz", "8.57 Hz", "10.00 Hz", "12.00 Hz"],
+            class_labels=["6.66", "7.50", "8.57", "10.00", "12.00"],
             events={"6.66": 1, "7.50": 2, "8.57": 3, "10.00": 4, "12.00": 5},
             trial_duration=5.0,
             study_design="Subjects focus attention on a single violet box flickering at different frequencies (6.66, 7.50, 8.57, 10.00, 12.00 Hz) presented sequentially. Each frequency is presented for 5 seconds (trial) followed by 5 seconds rest, repeated 3 times per frequency, with 30 seconds rest between different frequencies.",
@@ -666,7 +687,7 @@ class MAMEM1(BaseMAMEM):
             country="GR",
             repository="Figshare",
             data_url="https://dx.doi.org/10.6084/m9.figshare.2068677.v1",
-            license="ODC-By-1.0",
+            license="CC-BY-4.0",
             publication_year=2016,
             senior_author="Ioannis Kompatsiaris",
             associated_paper_doi="10.48550/arXiv.1602.00904",
@@ -684,7 +705,7 @@ class MAMEM1(BaseMAMEM):
             ],
         ),
         sessions_per_subject=1,
-        runs_per_session=None,
+        runs_per_session=5,
         sessions=None,
         data_processed=False,
         file_format="MATLAB .mat",
@@ -735,7 +756,7 @@ class MAMEM1(BaseMAMEM):
         ),
         data_structure=DataStructureMetadata(
             n_trials=1104,
-            trials_context="Total 1104 trials across all subjects. Each session includes 23 trials (8 adaptation + 15 main). S001: 3 sessions, S003 and S004: 4 sessions, others: 5 sessions. Some sessions excluded due to technical issues.",
+            trials_context="Total 1104 trials across all subjects. Each session includes 23 trials (8 adaptation + 15 main). S001: 3 sessions, S003 and S004: 4 sessions, others: 5 sessions. Some sessions excluded due to technical issues. The loader exposes each released session file (T0NN[a-e]) as one run of a single session; runs_per_session=5 is the maximum (3 runs for S001, S003 and S008, 4 for S004).",
         ),
         abstract="Brain-computer interfaces (BCIs) have been gaining momentum in making human-computer interaction more natural, especially for people with neuro-muscular disabilities. This report focuses on SSVEP-based BCIs and performs a comparative evaluation of the most promising algorithms. A dataset of 256-channel EEG signals from 11 subjects is provided, along with a processing toolbox for reproducing results and supporting further experimentation.",
         methodology="Empirical approach where each signal processing parameter (filtering, artifact removal, feature extraction, feature selection, classification) is studied independently by keeping all other parameters fixed. Leave-one-subject-out cross-validation used to evaluate system without subject-specific training. Multiple algorithms compared for each processing stage to obtain state-of-the-art baseline.",
@@ -747,7 +768,7 @@ class MAMEM1(BaseMAMEM):
             sessions_per_subject=1,
             # 5 runs per sessions, except 3 for S001, S003, S008, 4 for S004
             code="MAMEM1",
-            doi="10.48550/arXiv.1602.00904",
+            doi="10.6084/m9.figshare.2068677.v1",
             figshare_id=2068677,
             subjects=subjects,
             sessions=sessions,
@@ -833,6 +854,7 @@ class MAMEM2(BaseMAMEM):
     """
 
     nemar_id = "nm000120"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=250.0,
@@ -1116,7 +1138,36 @@ class MAMEM2(BaseMAMEM):
             gender={"male": 8, "female": 3},
             age_min=24,
             age_max=39,
-            handedness={"right": 10, "left": 1},
+            age_mean=30.4,
+            age_std=5.2,
+            ages=[24, 37, 39, 31, 27, 28, 26, 31, 29, 37, 25],
+            sexes=[
+                "male",
+                "male",
+                "male",
+                "male",
+                "female",
+                "female",
+                "male",
+                "female",
+                "male",
+                "male",
+                "male",
+            ],
+            handedness={"right": 8, "left": 3},
+            handedness_list=[
+                "right",
+                "right",
+                "right",
+                "right",
+                "left",
+                "right",
+                "right",
+                "right",
+                "right",
+                "left",
+                "left",
+            ],
             clinical_population=None,
             species="homo sapiens",
         ),
@@ -1124,7 +1175,7 @@ class MAMEM2(BaseMAMEM):
             events={"6.66": 1, "7.50": 2, "8.57": 3, "10.00": 4, "12.00": 5},
             paradigm="ssvep",
             n_classes=5,
-            class_labels=["6.66 Hz", "7.50 Hz", "8.57 Hz", "10.00 Hz", "12.00 Hz"],
+            class_labels=["6.66", "7.50", "8.57", "10.00", "12.00"],
             trial_duration=5.0,
             study_design="Subjects focus attention on visual stimuli flickering at different frequencies (6.66, 7.50, 8.57, 10.00, 12.00 Hz) to select commands. Each stimulus presented for 5 seconds followed by 5 seconds rest.",
             stimulus_type="flickering box",
@@ -1141,10 +1192,11 @@ class MAMEM2(BaseMAMEM):
             },
         ),
         documentation=DocumentationMetadata(
+            senior_author="Ioannis Kompatsiaris",
             doi="10.48550/arXiv.1602.00904",
-            repository="GitHub",
+            repository="Figshare",
             data_url="https://figshare.com/articles/dataset/3153409",
-            license="ODC-By-1.0",
+            license="CC-BY-4.0",
             investigators=[
                 "Vangelis P. Oikonomou",
                 "Georgios Liaros",
@@ -1157,7 +1209,7 @@ class MAMEM2(BaseMAMEM):
             institution="Centre for Research and Technology Hellas (CERTH)",
             country="GR",
             publication_year=2016,
-            associated_paper_doi="arXiv:1602.00904v2",
+            associated_paper_doi="10.48550/arXiv.1602.00904",
             funding=["H2020-ICT-2014-644780"],
             ethics_approval=[
                 "Approved by ethics committee of Centre for Research and Technology Hellas, date 3/7/2015, grant H2020-ICT-2014-644780"
@@ -1208,12 +1260,7 @@ class MAMEM2(BaseMAMEM):
         cross_validation=CrossValidationMetadata(
             cv_method="leave-one-subject-out", evaluation_type=["cross_subject"]
         ),
-        performance={
-            "accuracy_percent": 74.42,
-            "mean_accuracy_default_config": 72.47,
-            "mean_accuracy_optimal_config": 74.42,
-            "processing_time_msec": 68,
-        },
+        performance=None,
         bci_application=BCIApplicationMetadata(
             applications=["command_selection"],
             environment="laboratory",
@@ -1226,9 +1273,9 @@ class MAMEM2(BaseMAMEM):
             n_repetitions=3,
         ),
         data_structure=DataStructureMetadata(
-            n_trials=1104,
+            n_trials=None,
             n_trials_per_class=None,
-            trials_context="Each session includes 23 trials (8 adaptation trials excluded from analysis). 5 sessions per subject (with exceptions: S001=3 sessions, S003=4 sessions, S004=4 sessions). Total: 1104 trials of 5 seconds each.",
+            trials_context="Per the class docstring (experiment 2): 25 flickering windows of 5 s per session (5 per frequency), 5 sessions per subject, one adaptation period before the first session. Released as five files T0NN[a-e] per subject that the loader exposes as 5 runs of one session; the adaptation file (T0NNx) is skipped. The previous n_trials=1104 was copied from MAMEM1 and did not describe this experiment.",
         ),
         abstract="Brain-computer interfaces (BCIs) have been gaining momentum in making human-computer interaction more natural, especially for people with neuro-muscular disabilities. This study focuses on SSVEP-based BCIs and performs a comparative evaluation of state-of-the-art algorithms for filtering, artifact removal, feature extraction, feature selection and classification. Dataset consists of 256-channel EEG signals from 11 subjects with 5 flickering frequencies (6.66, 7.50, 8.57, 10.00, 12.00 Hz).",
         methodology="Leave-one-subject-out cross-validation was used to evaluate a general-purpose BCI system without subject-specific training. Systematic comparison of algorithms across all signal processing stages: (1) Signal filtering: FIR vs IIR filters; (2) Artifact removal: AMUSE vs FastICA; (3) Feature extraction: PWelch, Periodogram, PYULEAR, DWT, STFT, Goertzel; (4) Feature selection: entropy-based methods and PCA/SVD; (5) Classification: SVM, LDA, KNN, Naive Bayes, Random Forest, AdaBoost. Optimal configuration achieved 74.42% mean accuracy using IIR-Elliptic filter, AMUSE artifact removal, PWelch feature extraction with nfft=512, segment length=350, overlap=0.75, and channel-138.",
@@ -1323,6 +1370,10 @@ class MAMEM3(BaseMAMEM):
     interference, in matters of artifacts, on the recorded signal is expected
     to be high.
 
+    The PhysioNet record states no reference. The Emotiv EPOC has 14 channels
+    "plus CMS/DRL references, P3/P4 locations" (Emotiv EPOC technical
+    specifications), fixed by the headset.
+
     References
     ----------
     .. [1] Oikonomou, V. P., Liaros, G., Georgiadis, K., Chatzilari, E., Adam, K.,
@@ -1336,16 +1387,16 @@ class MAMEM3(BaseMAMEM):
     """
 
     nemar_id = "nm000121"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=128.0,
             channel_types={"eeg": 14},
-            montage="10-20",
-            hardware="EGI 300 Geodesic EEG System (GES 300)",
+            montage="standard_1020",
+            hardware="Emotiv EPOC (14 wireless channels)",
+            reference="CMS/DRL (P3/P4)",
+            ground="DRL",
             sensor_type="scalp electrodes",
-            reference="CAR",
-            software="Microsoft Visual Studio 2010 with OpenGL",
-            filters="5-48 Hz bandpass, 50 Hz notch",
             sensors=[
                 "AF3",
                 "AF4",
@@ -1363,27 +1414,46 @@ class MAMEM3(BaseMAMEM):
                 "T8",
             ],
             line_freq=50.0,
-            auxiliary_channels=AuxiliaryChannelsMetadata(
-                has_eog=True,
-                eog_type=["vertical"],
-                has_emg=True,
-                other_physiological=["ecg", "gsr", "ppg"],
-            ),
-            cap_manufacturer="EGI",
-            cap_model="HydroCel Geodesic Sensor Net (HCGSN)",
-            electrode_type="wet",
-            impedance_threshold_kohm=80.0,
+            cap_manufacturer="Emotiv",
+            cap_model="EPOC",
         ),
         participants=ParticipantMetadata(
             n_subjects=11,
             health_status="healthy",
             gender={"male": 8, "female": 3},
-            age_min=24.0,
-            age_max=39.0,
+            age_min=24,
+            age_max=39,
+            age_mean=30.4,
+            age_std=5.2,
             ages=[24, 37, 39, 31, 27, 28, 26, 31, 29, 37, 25],
-            handedness={"right": 10, "left": 1},
-            bci_experience="naive",
-            species="human",
+            sexes=[
+                "male",
+                "male",
+                "male",
+                "male",
+                "female",
+                "female",
+                "male",
+                "female",
+                "male",
+                "male",
+                "male",
+            ],
+            handedness={"right": 8, "left": 3},
+            handedness_list=[
+                "right",
+                "right",
+                "right",
+                "right",
+                "left",
+                "right",
+                "right",
+                "right",
+                "right",
+                "left",
+                "left",
+            ],
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             events={
@@ -1395,9 +1465,9 @@ class MAMEM3(BaseMAMEM):
             },
             paradigm="ssvep",
             n_classes=5,
-            class_labels=["6.66 Hz", "7.50 Hz", "8.57 Hz", "10.00 Hz", "12.00 Hz"],
+            class_labels=["6.66", "7.50", "8.57", "10.00", "12.00"],
             trial_duration=5.0,
-            study_design="Subjects focus attention on a violet box flickering at different frequencies (6.66, 7.50, 8.57, 10.00, 12.00 Hz) presented at the center of the monitor. Each trial lasts 5 seconds followed by 5 seconds rest.",
+            study_design="Five magenta boxes flickering simultaneously at 6.66, 7.50, 8.57, 10.00 and 12.00 Hz; a yellow arrow marks the box to attend. Each 5-second flickering window is followed by 5 seconds of rest (see the class docstring, transcribed from DataAcquisitionDetails-Experiment3.pdf).",
             stimulus_type="visual",
             stimulus_modalities=["visual"],
             primary_modality="visual",
@@ -1405,99 +1475,33 @@ class MAMEM3(BaseMAMEM):
             synchronicity="synchronous",
             feedback_type="none",
             has_training_test_split=False,
-            instructions="Subjects were instructed to focus attention on the flickering stimulus and minimize artifacts by reducing eye blinks and movements.",
-            stimulus_presentation={
-                "display": "22 inch LCD monitor, 60 Hz refresh rate, 1680x1080 resolution",
-                "background": "black",
-                "stimulus": "violet box flickering at center of screen",
-                "graphics": "Nvidia GeForce GTX 860M with vertical synchronization enabled",
-            },
         ),
         documentation=DocumentationMetadata(
-            doi="10.6084/m9.figshare.2068677.v1",
-            description="Comparative evaluation of state-of-the-art algorithms for SSVEP-based BCIs. Dataset includes 256-channel EEG signals from 11 subjects performing SSVEP tasks with 5 different flickering frequencies.",
-            investigators=[
-                "Vangelis P. Oikonomou",
-                "Georgios Liaros",
-                "Kostantinos Georgiadis",
-                "Elisavet Chatzilari",
-                "Katerina Adam",
-                "Spiros Nikolopoulos",
-                "Ioannis Kompatsiaris",
-            ],
-            institution="Centre for Research and Technology Hellas (CERTH)",
-            country="Greece",
-            repository="Figshare",
-            data_url="https://dx.doi.org/10.6084/m9.figshare.2068677.v1",
-            license="ODC-By-1.0",
-            publication_year=2016,
-            senior_author="Ioannis Kompatsiaris",
-            associated_paper_doi="arXiv:1602.00904v2",
             ethics_approval=[
-                "Ethics committee of the Centre for Research and Technology Hellas, approved 3/7/2015"
+                "Ethics Committee of the Centre for Research and Technology Hellas (3/7/2015)"
             ],
+            doi="10.6084/m9.figshare.3413851.v3",
+            associated_paper_doi="10.48550/arXiv.1602.00904",
+            description="MAMEM EEG SSVEP Dataset III (14 channels, 11 subjects, 5 frequencies presented simultaneously). EEG signals with 14 channels captured from 11 subjects executing a SSVEP-based experimental protocol; the Emotiv EPOC, using 14 wireless channels, has been used for capturing the signals.",
+            investigators=["Spiros Nikolopoulos"],
+            institution="Centre for Research and Technology Hellas (CERTH)",
+            country="GR",
+            repository="Figshare",
+            data_url="https://doi.org/10.6084/m9.figshare.3413851.v3",
+            license="CC-BY-4.0",
+            publication_year=2016,
+            senior_author="Spiros Nikolopoulos",
             keywords=[
                 "SSVEP",
                 "BCI",
                 "brain-computer interface",
                 "EEG",
                 "visual evoked potentials",
-                "comparative evaluation",
-                "signal processing",
+                "Emotiv EPOC",
             ],
         ),
         tags=Tags(pathology=["Healthy"], modality=["Visual"], type=["Perception"]),
-        preprocessing=PreprocessingMetadata(
-            preprocessing_applied=True,
-            preprocessing_steps=[
-                "bandpass filtering (5-48 Hz)",
-                "notch filtering (50 Hz)",
-                "artifact removal (AMUSE, ICA)",
-                "Common Average Reference (CAR)",
-            ],
-            highpass_hz=5.0,
-            lowpass_hz=48.0,
-            bandpass={"low_cutoff_hz": 5.0, "high_cutoff_hz": 48.0},
-            notch_hz=50.0,
-            filter_type="IIR (Chebyshev, Elliptic)",
-            artifact_methods=["AMUSE", "ICA", "FastICA"],
-            re_reference="CAR",
-        ),
-        signal_processing=SignalProcessingMetadata(
-            classifiers=[
-                "LDA",
-                "SVM",
-                "Random Forest",
-                "kNN",
-                "Naive Bayes",
-                "CCA",
-                "ELM",
-                "Decision Trees",
-            ],
-            feature_extraction=[
-                "Periodogram",
-                "Welch",
-                "Goertzel",
-                "Yule-AR",
-                "STFT",
-                "Discrete Wavelet Transform",
-                "PSD",
-                "CSP",
-                "ICA",
-            ],
-            frequency_bands={"analyzed_range": [5.0, 48.0]},
-            spatial_filters=["CAR", "CSP", "Minimum Energy"],
-        ),
-        cross_validation=CrossValidationMetadata(
-            cv_method="leave-one-subject-out", evaluation_type=["cross_subject"]
-        ),
-        performance={
-            "accuracy_percent": 72.47,
-            "default_config_accuracy": 72.47,
-            "optimal_config_accuracy": 79.47,
-            "best_electrode_accuracy": 74.42,
-            "execution_time_ms": 5.0,
-        },
+        preprocessing=PreprocessingMetadata(preprocessing_applied=False),
         bci_application=BCIApplicationMetadata(
             applications=["research", "comparative_study"],
             environment="laboratory",
@@ -1509,15 +1513,13 @@ class MAMEM3(BaseMAMEM):
             n_targets=5,
         ),
         data_structure=DataStructureMetadata(
-            n_trials=1104,
-            trials_context="Total of 1104 trials (5 seconds each) across all subjects and sessions. Subject S001: 3 sessions, S003 and S004: 4 sessions each, all others: 5 sessions. Each session includes 23 trials (8 adaptation + 15 experimental).",
+            n_trials=None,
+            trials_context="Per the class docstring (DataAcquisitionDetails-Experiment3.pdf, not re-verified in the 2026-09 audit): 25 flickering windows per session, 5 sessions per subject, released as 10 files per subject (U0NN[a-e][i|ii]) that the loader exposes as 10 runs of one session; adaptation files (U0NNx) are skipped.",
         ),
-        sessions_per_subject=5,
+        sessions_per_subject=1,
         runs_per_session=10,
-        data_processed=True,
-        file_format="csv",
-        abstract="Brain-computer interfaces (BCIs) have been gaining momentum in making human-computer interaction more natural, especially for people with neuro-muscular disabilities. This report focuses on EEG-based BCIs that rely on Steady-State-Visual-Evoked Potentials (SSVEPs) and performs a comparative evaluation of state-of-the-art algorithms for filtering, artifact removal, feature extraction, feature selection and classification. The dataset consists of 256-channel EEG signals from 11 subjects, along with a processing toolbox for reproducing results.",
-        methodology="Comparative evaluation of SSVEP-based BCI algorithms using leave-one-subject-out cross-validation. The study examines filtering methods (IIR, FIR), artifact removal (AMUSE, ICA), feature extraction (Periodogram, Welch, Goertzel, Yule-AR, STFT, DWT), feature selection (Shannon entropy, PCA, ICA), and classification (LDA, SVM, kNN, Naive Bayes, Random Forest, CCA, ELM, Decision Trees). Each parameter is studied independently while keeping others fixed to identify optimal configurations.",
+        data_processed=False,
+        file_format="mat",
     )
 
     def __init__(self, subjects=None, sessions=None):
@@ -1531,7 +1533,7 @@ class MAMEM3(BaseMAMEM):
             },
             sessions_per_subject=1,
             code="MAMEM3",
-            doi="10.48550/arXiv.1602.00904",
+            doi="10.6084/m9.figshare.3413851.v3",
             figshare_id=3413851,
             subjects=subjects,
             sessions=sessions,

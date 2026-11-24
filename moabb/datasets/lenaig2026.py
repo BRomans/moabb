@@ -11,11 +11,14 @@ from pathlib import Path
 import mne
 import numpy as np
 
+from moabb.utils import depreciated_alias
+
 from . import download as dl
 from .base import BaseDataset
 from .metadata.schema import (
     AcquisitionMetadata,
     DatasetMetadata,
+    DataStructureMetadata,
     DocumentationMetadata,
     ExperimentMetadata,
     ParticipantMetadata,
@@ -121,7 +124,8 @@ DEFAULT_EVENTS = {"Silence": 8}
 DATA_DIR = Path("../data_zenodo")
 
 
-class Lenaig2026(BaseDataset):
+@depreciated_alias("Lenaig2026", "1.9")
+class Gueho2026(BaseDataset):
     """
     SSAEP BCI dataset from Guého et al. (2026).
 
@@ -144,6 +148,11 @@ class Lenaig2026(BaseDataset):
     stim : str, optional
         Stimulus type ('Sinus', 'BrownNoise', 'Cat', 'Cicada'). Default is 'Sinus'.
 
+    The record states no reference or ground. For its standard cap layout
+    mBrainTrain gives "the reference electrode is located at the FCz location,
+    and ground electrode at the Fpz" (mBrainTrain support, Ref/Gnd locations),
+    and neither FCz nor Fpz is among the 24 recorded channels.
+
     References
     ----------
     .. [1] L. Guého, L. Bougrain, C. Plapous, P. Hénaff and R. Nicol, "An enhanced experimental paradigm for auditory BCIs by addressing both acoustic and human factors," 2026 14th International Conference on Brain-Computer Interface (BCI), Gangwon Province, Korea, Republic of, 2026, pp. 1-7, doi: 10.1109/BCI69045.2026.11435072.
@@ -153,30 +162,48 @@ class Lenaig2026(BaseDataset):
         acquisition=AcquisitionMetadata(
             sampling_rate=500,
             channel_types={"eeg": 24, "misc": 3},
+            hardware="mBrainTrain 24-channel headset with Smarting module",
+            reference="FCz",
+            ground="Fpz",
             sensor_type="EEG",
             electrode_material="Ag/AgCl",
             electrode_type="Wet - Passive",
             software="OpenVIBE",
             line_freq=50,
             montage="standard_1020",
+            sensors=list(_CH_NAMES_EEG.values()),
             impedance_threshold_kohm=10,
         ),
         participants=ParticipantMetadata(
-            n_subjects=48, gender={"male": 24, "female": 24}, age_max=63, age_min=18
+            n_subjects=24, gender={"male": 12, "female": 12}, age_max=63, age_min=18
         ),
         experiment=ExperimentMetadata(
-            events=_EVENT_DICT,
+            events={"Sinus": 4, "Silence": 8},
             paradigm="ssvep",
             n_classes=2,
-            class_labels=["Stimulus", "Silence"],
-            trials_per_class=10,
+            class_labels=["Sinus", "Silence"],
+            # 10 repetitions per condition per run x 2 runs = 20 trials per condition
+            # (5 conditions: Sinus, BrownNoise, Cicada, Cat, Silence) per the
+            # dataset description above; the schema declares ``trials_per_class``
+            # as Dict[str, int], not a bare int.
+            trials_per_class={"Sinus": 20, "Silence": 20},
             trial_duration=10,
-            feedback_type="auditory",
+            feedback_type="none",
+            stimulus_type=(
+                "40 Hz amplitude-modulated auditory stimuli (pure tone, "
+                "brownian noise, cicada song, cat's purr) and silence"
+            ),
+            stimulus_modalities=["auditory"],
+            primary_modality="auditory",
+            synchronicity="synchronous",
             mode="offline",
             has_training_test_split=False,
         ),
         documentation=DocumentationMetadata(
             doi=_DOI,
+            associated_paper_doi=_DOI,
+            repository="Zenodo",
+            data_url=f"https://doi.org/{_DATA_DOI}",
             license="CC-BY-NC-ND-4.0",
             country="FR",
             institution="Orange Labs",
@@ -188,13 +215,30 @@ class Lenaig2026(BaseDataset):
                 "Patrick Hénaff",
                 "Rozenn Nicol",
             ],
+            senior_author="Rozenn Nicol",
+            contact_info=[
+                "lenaig.gueho@orange.com",
+                "laurent.bougrain@loria.fr",
+                "cyril.plapous@orange.com",
+                "patrick.henaff@loria.fr",
+                "rozenn.nicol@orange.com",
+            ],
             publication_year=2026,
+        ),
+        # One session of two 10-minute runs per participant (Zenodo record);
+        # ``n_subjects`` counts both loudness experiments (24 + 24), the
+        # default ``exp=1`` instance exposes 24 subjects.
+        sessions_per_subject=1,
+        runs_per_session=2,
+        data_structure=DataStructureMetadata(
+            n_trials=100,
+            trials_context="per subject: 2 runs x 50 trials (10 repetitions per condition, 5 conditions)",
         ),
     )
 
     def __init__(self, exp=1, run="both", stim="Sinus"):
         """
-        Initialize the Lenaig2026 dataset object.
+        Initialize the Gueho2026 dataset object.
 
         Parameters
         ----------
@@ -279,26 +323,49 @@ class Lenaig2026(BaseDataset):
             if path
             else Path(dl.get_dataset_path(_SIGN, None)) / f"MNE-{_SIGN}-data"
         )
-        paths = [
-            base_path
-            / "EEG_24Chan_AudioStim"
-            / f"EXP{self.exp}/S1/R{run}/{subject:02}_R{run}.gdf"
-            for run in self.runs
+        rel_patterns = [
+            f"EXP{self.exp}/S1/R{run}/{subject:02}_R{run}.gdf" for run in self.runs
         ]
 
-        if all(p.exists() for p in paths) and not force_update:
-            return (
-                paths  # Return existing paths if all files exist and no update is forced
-            )
+        if not force_update:
+            paths = self._locate_files(base_path, rel_patterns)
+            if paths is not None:
+                return paths
 
         url = f"{_ZENODO_BASE}/EEG_24Chan_AudioStim.rar"
         rar_path = Path(dl.data_dl(url, sign=_SIGN, path=base_path, verbose=verbose))
         extract_rar(rar_path, dest_dir=base_path)
 
-        if not all(p.exists() for p in paths) or force_update:
+        paths = self._locate_files(base_path, rel_patterns)
+        if paths is None:
             raise FileNotFoundError("Some data files are missing.")
 
         return paths
+
+    @staticmethod
+    def _locate_files(base_path, rel_patterns):
+        """Locate each relative file pattern under ``base_path``.
+
+        The Zenodo record's RAR archive has shipped at least two extracted
+        layouts over time: wrapped under an ``EEG_24Chan_AudioStim/``
+        directory (what this loader originally assumed) and flat, with the
+        ``EXP*/`` directories directly at the extraction root (the current
+        Zenodo v2 archive, record ``21156618``). ``Path.glob("**/<rel>")``
+        matches both -- the recursive ``**`` segment matches zero or more
+        intermediate directories -- without hard-coding either layout. Does
+        not change which events/trials are read, only how the source files
+        are found.
+
+        Returns the list of matched paths (one per pattern, in order) or
+        ``None`` if any pattern has no match.
+        """
+        found = []
+        for rel in rel_patterns:
+            matches = sorted(base_path.glob(f"**/{rel}"))
+            if not matches:
+                return None
+            found.append(matches[0])
+        return found
 
     def _get_single_subject_data(self, subject):
         """
@@ -326,7 +393,7 @@ class Lenaig2026(BaseDataset):
             raw.rename_channels(_CH_NAMES_EEG, verbose=False)
 
             # Set standard 10-20 montage
-            montage = mne.channels.make_standard_montage("standard_1020")
+            montage = mne.channels.make_standard_montage("colin27_1020")
             raw.set_montage(montage, verbose=0)
 
             # Extract events from annotations

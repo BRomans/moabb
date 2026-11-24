@@ -143,6 +143,10 @@ class Gao2026(BaseDataset):
     Most subjects completed 2 sessions. Subjects 9 and 10 completed only
     session 1.
 
+    Licence: the figshare record and its README state CC BY 4.0 for the
+    dataset (the article itself is CC BY-NC-ND 4.0; the BIDS
+    ``dataset_description.json`` inside the archive says "CC0").
+
     References
     ----------
     .. [1] Gao, J., Liu, Y., Li, Z., Huang, K., Wang, F., Xu, J.,
@@ -163,25 +167,76 @@ class Gao2026(BaseDataset):
             sensor_type="Ag/AgCl",
             reference="CPz",
             ground="AFz",
-            filters={"sampling_rate": 1000},
+            sensors=list(_CH_NAMES),
+            impedance_threshold_kohm=5.0,
             line_freq=50.0,
         ),
         participants=ParticipantMetadata(
+            age_std=0.8,
             n_subjects=22,
             health_status="healthy",
             gender={"male": 17, "female": 5},
-            age_mean=None,
-            age_min=20.0,
-            age_max=23.0,
+            age_mean=21.4,
+            age_min=20,
+            age_max=23,
+            ages=[
+                20,
+                22,
+                22,
+                21,
+                22,
+                21,
+                21,
+                22,
+                22,
+                22,
+                22,
+                22,
+                22,
+                22,
+                21,
+                20,
+                21,
+                21,
+                23,
+                21,
+                20,
+                21,
+            ],
+            sexes=[
+                "male",
+                "male",
+                "male",
+                "male",
+                "female",
+                "female",
+                "female",
+                "male",
+                "male",
+                "female",
+                "male",
+                "male",
+                "male",
+                "male",
+                "male",
+                "male",
+                "male",
+                "male",
+                "male",
+                "female",
+                "male",
+                "male",
+            ],
             handedness=None,
-            species="human",
+            bci_experience="mixed",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             events=dict(_EVENTS),
             paradigm="imagery",
             n_classes=10,
             class_labels=list(_EVENTS.keys()),
-            trial_duration=4.0,
+            trial_duration=17.0,
             study_design=(
                 "Visual imagery of animals, figures, and objects "
                 "with simultaneous 32-channel EEG recording"
@@ -192,8 +247,19 @@ class Gao2026(BaseDataset):
             primary_modality="visual",
             synchronicity="synchronous",
             mode="offline",
+            stimulus_presentation={
+                "SoftwareName": "Psychtoolbox-3",
+                "screen_resolution": "1920x1080",
+            },
         ),
         documentation=DocumentationMetadata(
+            senior_author="Yunfa Fu",
+            ethics_approval=[
+                "Medical Ethics Committee of Kunming University of Science and Technology (KMUST-MEC-2023-029)"
+            ],
+            funding=[
+                "National Natural Science Foundation of China (No.62366026, No.62376112, No.82172058, No.81771926, No.61763022, and No. 62006246)"
+            ],
             doi="10.1038/s41597-025-06512-5",
             investigators=[
                 "Jing'ao Gao",
@@ -207,17 +273,22 @@ class Gao2026(BaseDataset):
                 "Yunfa Fu",
             ],
             institution="Kunming University of Science and Technology",
+            institution_department="Faculty of Science; Faculty of Information Engineering and Automation",
+            contact_info=["18183794848@163.com"],
             country="CN",
             repository="Figshare",
             data_url="https://doi.org/10.6084/m9.figshare.30227503.v1",
             publication_year=2026,
-            license="CC-BY-NC-ND-4.0",
+            license="CC-BY-4.0",
         ),
         sessions_per_subject=2,
         runs_per_session=3,
         tags=Tags(pathology=["Healthy"], modality=["Visual"], type=["Research"]),
         paradigm_specific=ParadigmSpecificMetadata(
-            detected_paradigm="imagery", imagery_tasks=list(_EVENTS.keys())
+            detected_paradigm="imagery",
+            imagery_tasks=list(_EVENTS.keys()),
+            cue_duration_s=4.0,
+            imagery_duration_s=4.0,
         ),
         data_structure=DataStructureMetadata(
             n_trials=16800,
@@ -281,18 +352,17 @@ class Gao2026(BaseDataset):
                     log.warning("Missing BDF file: %s", bdf_file)
                     continue
 
+                # The BDF header scale is correct as released: each file's
+                # physical range is set to its own largest sample, so stored
+                # values stay within +/-32768 and MNE's header calibration
+                # gives microvolt-level EEG. Do not rescale.
                 raw = mne.io.read_raw_bdf(str(bdf_file), preload=True, verbose=False)
-
-                # Neuracle BDF header has 16-bit digital min/max (-32768/32767)
-                # for 24-bit BDF data, making amplitudes 256x too large.
-                eeg_picks = mne.pick_types(raw.info, eeg=True)
-                raw._data[eeg_picks] /= 256
 
                 # Pick only EEG channels (drop Status).
                 raw.pick(["eeg"])
 
                 # Set standard montage.
-                montage = mne.channels.make_standard_montage("standard_1005")
+                montage = mne.channels.make_standard_montage("colin27_1005")
                 raw.set_montage(montage, on_missing="warn")
 
                 # Extract events from Status channel of the original file.

@@ -94,6 +94,46 @@ class LeftRightImagery(BaseMotorImagery):
     fmax: float (default 32)
         cutoff frequency (Hz) for the low pass filter.
 
+    Notes
+    -----
+    **Why 8-32 Hz by default.** The default band-pass filter (``fmin=8``,
+    ``fmax=32``) keeps the mu (about 8-13 Hz) and beta (about 13-30 Hz)
+    rhythms, whose event-related desynchronization and synchronization carry
+    most of the motor-imagery information. It also removes slow drifts and
+    most ocular activity, and limits the high-frequency muscle activity that
+    a classifier could otherwise exploit instead of brain activity [3]_. MOABB
+    applies the same preprocessing to every dataset so that pipelines are
+    compared on equal terms: the MOABB benchmark [1]_ filters all
+    motor-imagery datasets to 8-32 Hz, following the BCI literature [2]_.
+    The filter is an IIR filter with MNE's default parameters (4th-order
+    Butterworth, applied forward and backward).
+
+    The default serves comparability; it is not a requirement. If your
+    pipeline needs another band (deep-learning models often use a wider one),
+    change it and report the band you used:
+
+    - ``LeftRightImagery(fmin=4, fmax=40)`` filters to another band.
+    - ``LeftRightImagery(fmin=None, fmax=None)`` disables the filter.
+    - ``fmin=None`` alone gives a low-pass filter at ``fmax``, and
+      ``fmax=None`` alone a high-pass filter at ``fmin``.
+    - :class:`FilterBankLeftRightImagery` applies a bank of bands, set
+      with its ``filters`` argument.
+
+    To get the signal with no paradigm preprocessing at all, load it from the
+    dataset object (``dataset.get_data()``) instead of from the paradigm.
+
+    References
+    ----------
+    .. [1] S. Chevallier, I. Carrara, B. Aristimunha, P. Guetschel, S. Sedlar,
+           B. Lopes, S. Velut, S. Khazem and T. Moreau. The largest EEG-based
+           BCI reproducibility study for open science: the MOABB benchmark.
+           arXiv:2404.15319 (2024). https://arxiv.org/abs/2404.15319
+    .. [2] C. S. Nam, A. Nijholt and F. Lotte (eds.). Brain-Computer
+           Interfaces Handbook: Technological and Theoretical Advances.
+           CRC Press (2018).
+    .. [3] V. Jayaram and A. Barachant. MOABB: trustworthy algorithm
+           benchmarking for BCIs. Journal of Neural Engineering 15(6), 066011
+           (2018). https://doi.org/10.1088/1741-2552/aadea0
     """
 
     def __init__(
@@ -209,6 +249,46 @@ class MotorImagery(BaseMotorImagery):
     fmax: float (default 32)
         cutoff frequency (Hz) for the low pass filter.
 
+    Notes
+    -----
+    **Why 8-32 Hz by default.** The default band-pass filter (``fmin=8``,
+    ``fmax=32``) keeps the mu (about 8-13 Hz) and beta (about 13-30 Hz)
+    rhythms, whose event-related desynchronization and synchronization carry
+    most of the motor-imagery information. It also removes slow drifts and
+    most ocular activity, and limits the high-frequency muscle activity that
+    a classifier could otherwise exploit instead of brain activity [3]_. MOABB
+    applies the same preprocessing to every dataset so that pipelines are
+    compared on equal terms: the MOABB benchmark [1]_ filters all
+    motor-imagery datasets to 8-32 Hz, following the BCI literature [2]_.
+    The filter is an IIR filter with MNE's default parameters (4th-order
+    Butterworth, applied forward and backward).
+
+    The default serves comparability; it is not a requirement. If your
+    pipeline needs another band (deep-learning models often use a wider one),
+    change it and report the band you used:
+
+    - ``MotorImagery(fmin=4, fmax=40)`` filters to another band.
+    - ``MotorImagery(fmin=None, fmax=None)`` disables the filter.
+    - ``fmin=None`` alone gives a low-pass filter at ``fmax``, and
+      ``fmax=None`` alone a high-pass filter at ``fmin``.
+    - :class:`FilterBankMotorImagery` applies a bank of bands, set with
+      its ``filters`` argument.
+
+    To get the signal with no paradigm preprocessing at all, load it from the
+    dataset object (``dataset.get_data()``) instead of from the paradigm.
+
+    References
+    ----------
+    .. [1] S. Chevallier, I. Carrara, B. Aristimunha, P. Guetschel, S. Sedlar,
+           B. Lopes, S. Velut, S. Khazem and T. Moreau. The largest EEG-based
+           BCI reproducibility study for open science: the MOABB benchmark.
+           arXiv:2404.15319 (2024). https://arxiv.org/abs/2404.15319
+    .. [2] C. S. Nam, A. Nijholt and F. Lotte (eds.). Brain-Computer
+           Interfaces Handbook: Technological and Theoretical Advances.
+           CRC Press (2018).
+    .. [3] V. Jayaram and A. Barachant. MOABB: trustworthy algorithm
+           benchmarking for BCIs. Journal of Neural Engineering 15(6), 066011
+           (2018). https://doi.org/10.1088/1741-2552/aadea0
     """
 
     def __init__(
@@ -239,6 +319,9 @@ class MotorImagery(BaseMotorImagery):
             reject_by_annotation=reject_by_annotation,
         )
         self.n_classes = n_classes
+        # used_events fills n_classes in from the first dataset when it is None;
+        # only a value the user passed limits the events taken from later ones.
+        self._n_classes_given = n_classes is not None
 
         if self.events is None:
             log.warning("Choosing from all possible events")
@@ -268,6 +351,8 @@ class MotorImagery(BaseMotorImagery):
         if self.events is None:
             for k, v in dataset.event_id.items():
                 out[k] = v
+                if self._n_classes_given and len(out) == self.n_classes:
+                    break
             if self.n_classes is None:
                 self.n_classes = len(out)
         else:
@@ -336,7 +421,9 @@ class SpeechImagery(MotorImagery):
     fmax: float (default 100)
         cutoff frequency (Hz) for the low pass filter.
 
-    See :class:`MotorImagery` for the remaining parameters.
+    See Also
+    --------
+    MotorImagery : Base motor imagery paradigm for the remaining parameters.
     """
 
     def __init__(

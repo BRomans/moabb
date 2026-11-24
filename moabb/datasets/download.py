@@ -11,19 +11,16 @@ import json
 import logging
 import os
 import os.path as osp
+import re
 import shutil
 import warnings
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
-import nemar
 import pandas as pd
 import requests
-from httpx import TransportError
 from mne import get_config, set_config
-from mne.datasets.utils import _get_path
 from mne.utils import _url_to_local_path, verbose, warn
-from nemar.errors import NemarError, SelectionError
 from pooch import file_hash, retrieve
 from pooch.downloaders import choose_downloader
 from pooch.utils import unique_file_name
@@ -31,6 +28,34 @@ from requests.exceptions import HTTPError
 
 
 logger = logging.getLogger(__name__)
+
+
+def _nemar_deps():
+    g = globals()
+    if "nemar" not in g or "NemarError" not in g:
+        import nemar as _nemar
+        from httpx import TransportError as _TransportError
+        from nemar.errors import NemarError as _NemarError
+        from nemar.errors import SelectionError as _SelectionError
+
+        g.setdefault("nemar", _nemar)
+        g.setdefault("NemarError", _NemarError)
+        g.setdefault("SelectionError", _SelectionError)
+        g.setdefault("TransportError", _TransportError)
+    return g["nemar"], g["NemarError"], g["SelectionError"], g["TransportError"]
+
+
+def __getattr__(name):
+    if name in ("nemar", "NemarError", "SelectionError", "TransportError"):
+        _nemar_deps()
+        return globals()[name]
+    if name == "_get_path":
+        from mne.datasets.utils import _get_path as _mne_get_path
+
+        globals()["_get_path"] = _mne_get_path
+        return _mne_get_path
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 #: Local directory mirroring the upstream files of the dataset whose loader is
 #: currently executing (its NEMAR sourcedata store), or None. Set by
@@ -63,21 +88,39 @@ def _store_lookup(url, fname=None):
     ``fname`` is probed first, but the URL tails remain fallbacks: a caller's
     ``fname`` names the *destination* (e.g. Lee2024 prefixes the experiment
     directory and zero-pads subject 8), while the store keeps the upstream
-    names, so the two can legitimately differ. A miss returns None and the
-    caller downloads.
+    names, so the two can legitimately differ. A tail of two or more segments
+    whose file name has no extension also matches a single stored file that
+    adds one: deposits keep some extension-less downloads under their content
+    type (Mendeley's ``<uuid>/file_downloaded`` as ``file_downloaded.xdf``).
+    A miss returns None and the caller downloads.
     """
     store = _ACTIVE_STORE.get()
     if store is None:
         return None
     tails = [PurePosixPath(fname).parts] if fname is not None else []
     parts = PurePosixPath(urlparse(url).path).parts
-    # ponytail: three trailing segments cover every current dataset layout;
-    # deepen if a deposit ever nests further.
-    tails += [parts[i:] for i in range(max(len(parts) - 3, 0), len(parts))]
+    # ponytail: four trailing segments cover every current dataset layout
+    # (Thielen2021: offline/sub-01/block_1/trainlabels.mat); deepen if a
+    # deposit ever nests further.
+    tails += [parts[i:] for i in range(max(len(parts) - 4, 0), len(parts))]
     for tail in tails:
         if not tail:
             continue
         candidate = Path(store).joinpath(*tail)
+        if not candidate.is_file() and len(tail) > 1 and not candidate.suffix:
+            variants = (
+                [
+                    path
+                    for path in candidate.parent.glob(
+                        glob_module.escape(candidate.name) + ".*"
+                    )
+                    if path.is_file()
+                ]
+                if candidate.parent.is_dir()
+                else []
+            )
+            if len(variants) == 1:
+                candidate = variants[0]
         if candidate.is_file():
             logger.info(
                 "Filling %s from the local NEMAR store instead of downloading %s.",
@@ -120,9 +163,105 @@ def _set_user_agent(downloader):
     headers.setdefault("User-Agent", get_user_agent())
 
 
+#: HTTPS mirror of PhysioNet's ``/files/`` tree on the AWS Open Data
+#: registry. Verified byte-identical for ``eegmmidb`` and ``bigp3bci``
+#: (spot-checked EDFs plus ``.event``/``SHA256SUMS.txt`` probes, Oct 2026).
+#: ``s3://physionet-open/...`` and this HTTPS endpoint serve the same
+#: objects; HTTPS is used because pooch only speaks http(s)/ftp/sftp/doi.
+PHYSIONET_S3_MIRROR_BASE = "https://physionet-open.s3.amazonaws.com"
+_PHYSIONET_UPSTREAM_PREFIX = "https://physionet.org/files/"
+
+
+def _s3_mirror_enabled() -> bool:
+    """Whether the PhysioNet S3 HTTPS mirror may be tried first.
+
+    Enabled by default; set ``MOABB_S3_MIRROR=0`` (or ``false``/``off``/
+    ``disabled``) to force direct upstream downloads.
+    """
+    return os.environ.get("MOABB_S3_MIRROR", "1").lower() not in (
+        "0",
+        "false",
+        "off",
+        "no",
+        "disabled",
+    )
+
+
+def physionet_s3_mirror(url: str) -> str | None:
+    """Return the AWS Open Data HTTPS mirror for a PhysioNet ``/files/`` URL.
+
+    Only rewrites the ``https://physionet.org/files/<dataset>/...`` tree,
+    which the ``physionet-open`` bucket mirrors 1:1. Returns ``None`` for
+    any other URL (including ``archive.physionet.org``), so callers can
+    fall back to the upstream host untouched.
+    """
+    if not isinstance(url, str):
+        return None
+    if not url.startswith(_PHYSIONET_UPSTREAM_PREFIX):
+        return None
+    rest = url[len(_PHYSIONET_UPSTREAM_PREFIX) :]
+    if not rest or ".." in rest.split("/"):
+        return None
+    return PHYSIONET_S3_MIRROR_BASE + "/" + rest
+
+
+# Set after the first mirror failure in this process: later files go straight
+# upstream instead of paying one timeout and one warning per file.
+_S3_MIRROR_FAILED = False
+
+
+def _retrieve_with_physionet_fallback(
+    url, *, fname, path, known_hash=None, progressbar=True, downloader=None
+):
+    """Retrieve ``url`` preferring the PhysioNet S3 mirror on failure-prone hosts.
+
+    The destination is always ``path/fname`` (derived from the upstream URL
+    by the caller), so a mirror hit lands exactly where the loader expects
+    and pooch skips re-download afterwards. On any mirror transport failure
+    this warns, retries the upstream URL and skips the mirror for the rest
+    of the process; the upstream error (if it also fails) is the one raised.
+    """
+    global _S3_MIRROR_FAILED
+    use_mirror = _s3_mirror_enabled() and not _S3_MIRROR_FAILED
+    mirror = physionet_s3_mirror(url) if use_mirror else None
+    if mirror is not None:
+        # TLS verification stays on: the ``verify=False`` workaround the
+        # callers apply is for upstream hosts with broken chains, not AWS.
+        mirror_downloader = choose_downloader(mirror, progressbar=progressbar)
+        _set_user_agent(mirror_downloader)
+        try:
+            return retrieve(
+                mirror,
+                known_hash,
+                fname=fname,
+                path=path,
+                progressbar=progressbar,
+                downloader=mirror_downloader,
+            )
+        except Exception as exc:
+            _S3_MIRROR_FAILED = True
+            # warnings.warn, not mne.utils.warn: the latter is silent when the
+            # MNE log level is above WARNING, and users should see the fallback.
+            warnings.warn(
+                f"S3 mirror download failed for {mirror} ({exc!r}); "
+                f"falling back to upstream {url} for this and later files. "
+                "Set MOABB_S3_MIRROR=0 to skip the mirror.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    return retrieve(
+        url,
+        known_hash,
+        fname=fname,
+        path=path,
+        progressbar=progressbar,
+        downloader=downloader,
+    )
+
+
 def _sanitize_path(path: Path) -> Path:
     path = Path(path)
-    table = {ord(c): "-" for c in ':*?"<>|'}
+    table = {ord(c): "-" for c in '~:*?"<>|'}
 
     if path.anchor:
         return Path(path.anchor, *(part.translate(table) for part in path.parts[1:]))
@@ -143,6 +282,28 @@ def _normalize_destination(url: str, root: Path) -> Path:
             fname = parts[-1]
             return root / "zenodo" / record_id / fname
     return Path(_url_to_local_path(url, root))
+
+
+_MNE_CONFIG_CACHE = (None, None, {})
+
+
+def _fast_get_mne_config(key):
+    """Read MNE config key from os.environ or mtime-cached mne-python.json."""
+    global _MNE_CONFIG_CACHE
+    if key in os.environ:
+        return os.environ[key]
+    try:
+        from mne.utils.config import get_config_path
+
+        cfg_path = get_config_path()
+        st = os.stat(cfg_path)
+        cache_key = (cfg_path, st.st_mtime_ns, st.st_size)
+        if _MNE_CONFIG_CACHE[:2] != cache_key[:2] or _MNE_CONFIG_CACHE[1] != cache_key:
+            with open(cfg_path, encoding="utf-8") as f:
+                _MNE_CONFIG_CACHE = (cfg_path, cache_key, json.load(f))
+        return _MNE_CONFIG_CACHE[2].get(key)
+    except Exception:
+        return get_config(key)
 
 
 def get_dataset_path(sign, path):
@@ -166,21 +327,30 @@ def get_dataset_path(sign, path):
         Location of where to look for the data storing location
     """
     sign = sign.upper()
-    key = "MNE_DATASETS_{:s}_PATH".format(sign)
-    if get_config(key) is None:
-        if get_config("MNE_DATA") is None:
-            path_def = Path.home() / "mne_data"
-            logger.info(
-                "MNE_DATA is not already configured. It will be set to "
-                "default location in the home directory - "
-                + str(path_def)
-                + "\nAll datasets will be downloaded to this location, if anything is "
-                "already downloaded, please move manually to this location"
-            )
-            if not path_def.is_dir():
-                path_def.mkdir(parents=True)
-            set_config("MNE_DATA", str(Path.home() / "mne_data"))
-    return _get_path(path, key, sign)
+    key = f"MNE_DATASETS_{sign}_PATH"
+    get_path_fn = globals().get("_get_path")
+    if get_path_fn is None:
+        from mne.datasets.utils import _get_path as get_path_fn
+
+        globals()["_get_path"] = get_path_fn
+    if path is not None:
+        return get_path_fn(path, key, sign)
+
+    resolved = _fast_get_mne_config(key) or _fast_get_mne_config("MNE_DATA")
+    if resolved is None:
+        path_def = Path.home() / "mne_data"
+        logger.info(
+            "MNE_DATA is not already configured. It will be set to "
+            "default location in the home directory - "
+            + str(path_def)
+            + "\nAll datasets will be downloaded to this location, if anything is "
+            "already downloaded, please move manually to this location"
+        )
+        if not path_def.is_dir():
+            path_def.mkdir(parents=True)
+        resolved = str(path_def)
+        set_config("MNE_DATA", resolved)
+    return get_path_fn(resolved, key, sign)
 
 
 @verbose
@@ -286,7 +456,11 @@ def data_dl(url, sign, path=None, force_update=False, verbose=None, fname=None):
         destination = _sanitize_path(root / fname)
     else:
         destination = _sanitize_path(_normalize_destination(url, root))
-        legacy_destination = _sanitize_path(Path(_url_to_local_path(url, root)))
+        # Raw (unsanitized) on purpose: this lookup exists to FIND
+        # pre-sanitization files -- e.g. the literal '~bci' components
+        # mirrored from https://lampx.tugraz.at/~bci/... URLs -- and
+        # migrate them to the sanitized destination below.
+        legacy_destination = Path(_url_to_local_path(url, root))
         if legacy_destination.exists() and not destination.exists():
             destination.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -319,15 +493,146 @@ def data_dl(url, sign, path=None, force_update=False, verbose=None, fname=None):
         known_hash = None
     else:
         known_hash = file_hash(str(destination))
-    dlpath = retrieve(
+    dlpath = _retrieve_with_physionet_fallback(
         url,
-        known_hash,
         fname=destination.name,
         path=str(destination.parent),
+        known_hash=known_hash,
         progressbar=True,
         downloader=downloader,
     )
     return dlpath
+
+
+def data_dl_destination(url, sign, path=None, fname=None):
+    """Where :func:`data_dl` stores ``url``, computed without any network.
+
+    Lets a loader locate the directory an archive extracts into before deciding
+    whether the archive has to be downloaded at all.
+    """
+    root = Path(get_dataset_path(sign, path)) / "MNE-{:s}-data".format(sign.lower())
+    if fname is not None:
+        return _sanitize_path(root / fname)
+    return _sanitize_path(_normalize_destination(url, root))
+
+
+def fill_from_store(base_dir, files):
+    """Place archive members from the active NEMAR store; True if all are there.
+
+    NEMAR deposits mirror an archive's *extracted* members, not the archive, so
+    a URL lookup for the archive (see :func:`data_dl`) never matches. A loader
+    about to download an archive only to extract ``files`` below ``base_dir``
+    asks here first: each file is looked up in the store under its path
+    relative to ``base_dir`` -- the layout the deposit was taken from.
+
+    All or nothing: files are linked only when the store (or the cache) holds
+    every one of them, so a partial deposit never leaves a half-extracted tree
+    that the loader would mistake for a complete one, and an archive extracted
+    later never writes through a link into the store.
+
+    Parameters
+    ----------
+    base_dir : str | pathlib.Path
+        Directory the archive extracts into.
+    files : list of str | pathlib.Path
+        Absolute paths, below ``base_dir``, of the members the loader reads.
+
+    Returns
+    -------
+    bool
+        True when every file exists afterwards.
+    """
+    base_dir = Path(base_dir)
+    store = _ACTIVE_STORE.get()
+    pending = []
+    for target in map(Path, files):
+        if target.is_file():
+            continue
+        if store is None:
+            return False
+        try:
+            member = target.relative_to(base_dir)
+        except ValueError:
+            return False
+        source = Path(store, *PurePosixPath(member.as_posix()).parts)
+        if not source.is_file():
+            return False
+        pending.append((source, target))
+    for source, target in pending:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(source, target)
+        except OSError:
+            shutil.copy2(source, target)
+    if pending:
+        logger.info(
+            "Filled %d archive member(s) in %s from the local NEMAR store.",
+            len(pending),
+            base_dir,
+        )
+    return True
+
+
+def fill_tree_from_store(base_dir, member_dir):
+    """Place a whole extracted directory from the active NEMAR store.
+
+    :func:`fill_from_store` for loaders that read every file an archive
+    extracts below one directory (e.g. one per subject) instead of a fixed
+    list: the members are the files the store holds below ``member_dir``.
+    Recordings whose headers name files the store lacks (a BrainVision
+    ``.vhdr`` without its ``.eeg``/``.vmrk``, an EEGLAB ``.set`` without its
+    ``.fdt``) mean the directory is incomplete, and nothing is placed.
+
+    Parameters
+    ----------
+    base_dir : str | pathlib.Path
+        Directory the archive extracts into.
+    member_dir : str
+        The directory, relative to ``base_dir``, the loader reads.
+
+    Returns
+    -------
+    bool
+        True when ``base_dir / member_dir`` holds every file the store has
+        there afterwards; False without an active store or when the store
+        does not hold a complete copy of the directory.
+    """
+    store = _ACTIVE_STORE.get()
+    if store is None:
+        return False
+    store = Path(store)
+    source_dir = store.joinpath(*PurePosixPath(Path(member_dir).as_posix()).parts)
+    if not source_dir.is_dir():
+        return False
+    names = sorted(
+        path.relative_to(store).as_posix()
+        for path in source_dir.rglob("*")
+        if path.is_file()
+    )
+    if not names or _missing_companions(store, names):
+        return False
+    return fill_from_store(base_dir, [Path(base_dir, name) for name in names])
+
+
+def active_store():
+    """The active local sourcedata store root, or None."""
+    store = _ACTIVE_STORE.get()
+    return Path(store) if store is not None else None
+
+
+def store_glob(pattern):
+    """Names in the active NEMAR store matching ``pattern``, relative to its root.
+
+    For loaders that locate a member by pattern rather than by a fixed name
+    (e.g. a subject directory named after its unknown recording date), before
+    handing the match to :func:`fill_tree_from_store`. Empty without an active
+    store.
+    """
+    store = _ACTIVE_STORE.get()
+    if store is None:
+        return []
+    store = Path(store)
+    return sorted(path.relative_to(store).as_posix() for path in store.glob(pattern))
 
 
 @verbose
@@ -376,8 +681,9 @@ def nemar_dl(
     # nemar-py re-fetch the requested subject. Do not delete ``target_dir``
     # here: it is the shared BIDS root, and ``download()`` calls this once per
     # subject, so removing it would wipe subjects fetched in earlier iterations.
+    nemar_mod, NemarError, _SelectionError, TransportError = _nemar_deps()
     try:
-        nemar.download(
+        nemar_mod.download(
             dataset=nemar_id,
             target_dir=target_dir,
             subject=subject,
@@ -418,8 +724,9 @@ def _sourcedata_files_for_subject(target_dir, nemar_id, subject, force_update):
     """
     provenance = target_dir / SOURCEDATA_PROVENANCE
     if force_update or not provenance.is_file():
+        nemar_mod, NemarError, SelectionError, TransportError = _nemar_deps()
         try:
-            nemar.download(
+            nemar_mod.download(
                 dataset=nemar_id,
                 target_dir=target_dir,
                 scope="sourcedata",
@@ -449,15 +756,20 @@ def _sourcedata_files_for_subject(target_dir, nemar_id, subject, force_update):
     if not files:
         known = sorted(
             {
-                str(entry["subject"])
+                label
                 for entry in record.get("files") or []
-                if isinstance(entry, dict) and entry.get("subject")
+                if isinstance(entry, dict)
+                for label in _entry_subjects(entry)
             }
         )
         raise NemarDownloadError(
             f"NEMAR dataset {nemar_id} lists no sourcedata for subject "
             f"{subject!r}. Known subjects: {known}."
         )
+    # Files the manifest attributes to no subject (montages, band/interval
+    # definitions, a performance table) are read by every subject's load, so
+    # they belong to every subject's selection.
+    files = files + _manifest_shared_files(record)
     # Manifest names are literal file paths, but they are consumed as glob
     # patterns (nemar's include and the local verification below) -- escape
     # them so names containing [, ], * or ? still match.
@@ -481,23 +793,75 @@ def _sourcedata_store_holds_data(target_dir):
     return False
 
 
+def _entry_records_subjects(entry):
+    """Whether a provenance entry carries a subject field at all."""
+    return "subject" in entry or "subjects" in entry
+
+
+def _entry_subjects(entry):
+    """The subject labels a provenance entry is filed under, as strings.
+
+    A file is usually one subject's (``"subject": "3"``), but some upstream
+    files hold several subjects' recordings -- Zheng2020's ``G{g}D{1,2}.mat``
+    each carry both members of pair ``g`` (MOABB subjects ``2g-1`` and
+    ``2g``). Such an entry lists them all, either in ``"subjects"`` (the form
+    deposits use, see below) or as a list in ``"subject"``; the file then
+    belongs to the selection of every subject listed.
+
+    Deposits write the list in ``"subjects"`` and leave ``"subject"`` out of
+    those entries: MOABB releases up to 1.7.2 read only ``"subject"``, so a
+    manifest whose entries have no ``"subject"`` key at all is, for them, one
+    that predates the field and is fetched whole -- what they already did for
+    such a deposit. A list in ``"subject"`` (or ``"subject": null`` on every
+    entry) would instead match no subject there and fail the NEMAR fetch.
+
+    An empty set means the entry belongs to no subject: shared by every
+    subject's load.
+    """
+    labels = set()
+    for key in ("subject", "subjects"):
+        value = entry.get(key)
+        values = value if isinstance(value, (list, tuple)) else [value]
+        labels.update(str(v) for v in values if v not in (None, ""))
+    return labels
+
+
 def _manifest_subject_files(record, subject):
     """The files a provenance record attributes to ``subject``.
 
     ``None`` when the manifest predates the ``subject`` field and so cannot
     answer per subject; an empty list when it can answer but knows nothing
-    about this subject. Names are returned raw -- callers that feed them to a
-    glob escape them themselves.
+    about this subject. An entry filed under several subjects (see
+    :func:`_entry_subjects`) belongs to each of them. Names are returned raw --
+    callers that feed them to a glob escape them themselves.
     """
     entries = [entry for entry in (record.get("files") or []) if isinstance(entry, dict)]
-    if not any("subject" in entry for entry in entries):
+    if not any(_entry_records_subjects(entry) for entry in entries):
         return None
     candidates = subject if isinstance(subject, (list, tuple, set)) else [subject]
     wanted = {str(candidate) for candidate in candidates}
     return [
         entry["file"]
         for entry in entries
-        if entry.get("file") and str(entry.get("subject")) in wanted
+        if entry.get("file") and _entry_subjects(entry) & wanted
+    ]
+
+
+def _manifest_shared_files(record):
+    """The files a per-subject provenance record attributes to no subject.
+
+    Only meaningful once the manifest records subjects at all: then an entry
+    whose ``subject`` is missing or empty (and that lists no ``subjects``) is
+    shared by every subject's load (Brandl2020's ``mnt.mat`` montage,
+    Dreyer2023's ``performance.csv``). Names are returned raw.
+    """
+    entries = [entry for entry in (record.get("files") or []) if isinstance(entry, dict)]
+    if not any(_entry_records_subjects(entry) for entry in entries):
+        return []
+    return [
+        entry["file"]
+        for entry in entries
+        if entry.get("file") and not _entry_subjects(entry)
     ]
 
 
@@ -544,8 +908,212 @@ def nemar_sourcedata_is_local(target_dir, subject):
         files = None
     if files is None:
         return _sourcedata_store_holds_data(target_dir)
+    if not files:
+        return False
     sourcedata_dir = target_dir / "sourcedata"
-    return bool(files) and all(_is_stored_file(sourcedata_dir, name) for name in files)
+    return all(
+        _is_stored_file(sourcedata_dir, name)
+        for name in files + _manifest_shared_files(record)
+    )
+
+
+_LOADER_CACHE_DIR = re.compile(r"MNE-(.+)-data")
+
+
+def _loader_cache_root(record, path=None):
+    """Where, on this machine, the loader keeps the files a deposit mirrors.
+
+    A deposit's ``sourcedata/`` is a snapshot of the loader's own cache after
+    ``data_path()`` ran -- archives already extracted, opaque download URLs
+    already resolved to file names -- and its provenance records that cache
+    directory as ``upstream_cache_root``, e.g.
+    ``/scratch/.../mne_data/MNE-Simoes2020-data/BCIAUT_P300``. The manifest
+    names files relative to it. Rebase everything from the ``MNE-<sign>-data``
+    component on this machine's dataset path for that sign.
+
+    Returns None when the manifest records no such root, or one that would
+    leave the dataset directory.
+    """
+    root = record.get("upstream_cache_root")
+    if not isinstance(root, str) or not root:
+        return None
+    parts = PurePosixPath(root.replace("\\", "/")).parts
+    for index in range(len(parts) - 1, -1, -1):
+        match = _LOADER_CACHE_DIR.fullmatch(parts[index])
+        if match is None:
+            continue
+        tail = parts[index:]
+        if any(part in ("..", ".") for part in tail):
+            return None
+        return Path(get_dataset_path(match.group(1), path)).joinpath(*tail)
+    return None
+
+
+_BRAINVISION_COMPANION = re.compile(r"^\s*(?:DataFile|MarkerFile)\s*=\s*(.+?)\s*$", re.M)
+
+
+def _eeglab_data_file(header):
+    """The ``.fdt`` an EEGLAB ``.set`` stores its samples in, or None if embedded.
+
+    Raises when the file cannot be read as a MATLAB v5 ``.set``.
+    """
+    from scipy.io import loadmat, whosmat
+
+    names = {name for name, _shape, _cls in whosmat(header)}
+    if "data" in names:  # EEGLAB >= 2019 saves the EEG fields at top level
+        data = loadmat(header, variable_names=["data"], squeeze_me=True)["data"]
+    else:
+        eeg = loadmat(
+            header, variable_names=["EEG"], squeeze_me=True, struct_as_record=False
+        )["EEG"]
+        data = eeg.data
+    return data if isinstance(data, str) else None
+
+
+def _missing_companions(sourcedata_dir, files):
+    """Files that the store's recording headers name but the store lacks.
+
+    Some deposits mirror only part of a recording: the ``.vhdr`` of a
+    BrainVision set without the ``.eeg``/``.vmrk`` it points to, an EEGLAB
+    ``.set`` without its ``.fdt``, or Curry ``.cdt`` samples without their
+    ``.cdt.dpa``/``.cdt.dpo`` header. An EEGLAB header that cannot be read
+    counts as incomplete.
+    """
+    missing = set()
+    for name in files:
+        if name.lower().endswith(".cdt"):
+            # Curry 8 keeps the header next to the samples (.cdt.dpa/.cdt.dpo).
+            data = sourcedata_dir / name
+            if data.is_file() and not any(
+                Path(f"{data}{suffix}").is_file() for suffix in (".dpa", ".dpo")
+            ):
+                missing.add(f"{name}.dpa")
+            continue
+        if name.lower().endswith(".set"):
+            header = sourcedata_dir / name
+            if header.with_suffix(".fdt").is_file() or not header.is_file():
+                continue
+            try:
+                data_file = _eeglab_data_file(header)
+            except Exception:  # noqa: BLE001 - unreadable header: do not place it
+                missing.add(str(PurePosixPath(name).with_suffix(".fdt")))
+                continue
+            if data_file and not (header.parent / data_file).is_file():
+                missing.add(str(PurePosixPath(name).parent / data_file))
+            continue
+        if not name.lower().endswith(".vhdr"):
+            continue
+        header = sourcedata_dir / name
+        try:
+            text = header.read_text(encoding="latin-1")
+        except OSError:
+            continue
+        for companion in _BRAINVISION_COMPANION.findall(text):
+            if (header.parent / companion).is_file():
+                continue
+            # Some deposits rename the recordings to BIDS names but leave the
+            # header naming the pre-rename file (Thapa2025 subject 9). The
+            # loaders that read such deposits override the data/marker file
+            # names with the header's own stem, so a same-suffix companion
+            # under that stem satisfies the reference.
+            stem = PurePosixPath(name).stem
+            if any(
+                PurePosixPath(f).parent == PurePosixPath(name).parent
+                and PurePosixPath(f).stem == stem
+                and PurePosixPath(f).suffix == PurePosixPath(companion).suffix
+                for f in files
+            ):
+                continue
+            missing.add(str(PurePosixPath(name).parent / companion))
+    return missing
+
+
+def seed_loader_cache(target_dir, subject, path=None):
+    """Link a subject's NEMAR sourcedata into the loader's own cache tree.
+
+    :func:`_store_lookup` serves a download only when the store holds the file
+    under the URL's trailing segments. Loaders that download an archive and
+    extract it, or that fetch opaque URLs (OSF file ids, DSpace bitstream
+    uuids, figshare ``ndownloader`` ids), never match: the store holds the
+    extracted or resolved files instead. Those loaders do check their cache
+    before downloading, so placing the store's files where the loader itself
+    would have left them -- the layout the deposit was snapshotted from -- lets
+    them load without contacting the upstream host.
+
+    Files are hard-linked (copied across filesystems), never overwrite an
+    existing cache file, and are confined to the rebased cache root.
+
+    Parameters
+    ----------
+    target_dir : pathlib.Path
+        The deposit's local root, as returned by :func:`nemar_store`.
+    subject : int | str | list
+        Subject identifier, or the identifiers a deposit may file it under.
+    path : None | str
+        Base path where MOABB stores datasets.
+
+    Returns
+    -------
+    int
+        Number of files placed in the cache.
+    """
+    target_dir = Path(target_dir)
+    try:
+        record = json.loads(
+            (target_dir / SOURCEDATA_PROVENANCE).read_text(encoding="utf-8")
+        )
+        entries = [e for e in record.get("files") or [] if isinstance(e, dict)]
+        files = _manifest_subject_files(record, subject)
+        if files is None:
+            files = [entry["file"] for entry in entries if entry.get("file")]
+        else:
+            # Files no subject owns (montages, shared tables) serve every
+            # subject's load; placed whenever the store holds them.
+            files = files + _manifest_shared_files(record)
+        cache_root = _loader_cache_root(record, path)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return 0
+    if cache_root is None:
+        return 0
+    sourcedata_dir = target_dir / "sourcedata"
+    resolved_store = sourcedata_dir.resolve()
+    resolved_root = cache_root.resolve()
+    pending = []
+    for name in files:
+        if not _is_stored_file(sourcedata_dir, name):
+            continue
+        destination = cache_root / name
+        # Manifest names are data: keep both ends inside their trees.
+        if not (sourcedata_dir / name).resolve().is_relative_to(resolved_store):
+            continue
+        if not destination.resolve().is_relative_to(resolved_root):
+            continue
+        if not destination.exists():
+            pending.append((sourcedata_dir / name, destination))
+    if not pending:
+        return 0
+    # A partial recording in the cache is worse than none: a loader that only
+    # tests "is the extracted tree there?" would skip its own download and then
+    # load a fraction of the subject, or fail on an absent file.
+    missing = _missing_companions(sourcedata_dir, files)
+    if missing:
+        logger.warning(
+            "Not placing NEMAR store files in %s: the deposit lacks %s, which "
+            "its headers reference; the dataset's own downloader is used.",
+            cache_root,
+            ", ".join(sorted(missing)[:3]) + (" ..." if len(missing) > 3 else ""),
+        )
+        return 0
+    for source, destination in pending:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(source, destination)
+        except OSError:
+            shutil.copy2(source, destination)
+    logger.info(
+        "Placed %d file(s) from the local NEMAR store in %s.", len(pending), cache_root
+    )
+    return len(pending)
 
 
 @verbose
@@ -631,8 +1199,9 @@ def nemar_sourcedata_dl(
         f"NEMAR dataset {nemar_id} published no {what} -- the original "
         "distribution is not mirrored there."
     )
+    nemar_mod, NemarError, SelectionError, TransportError = _nemar_deps()
     try:
-        nemar.download(
+        nemar_mod.download(
             dataset=nemar_id,
             target_dir=target_dir,
             scope="sourcedata",
@@ -816,7 +1385,10 @@ def download_if_missing(
     """Download file from url to a specified path if it is not already there.
 
     If ``force_update`` is True, an existing local copy is deleted and
-    downloaded again.
+    downloaded again. Like :func:`data_dl`, a missing file is first taken
+    from the active NEMAR store when it holds it under the URL's trailing
+    path segments (e.g. a ``SHA256SUMS.txt`` index at the root of the
+    deposit's ``sourcedata/``).
     """
 
     folder_path = osp.dirname(file_path)
@@ -830,6 +1402,15 @@ def download_if_missing(
     if force_update and osp.exists(file_path):
         os.remove(file_path)
 
+    if not force_update and not osp.exists(file_path):
+        mirror = _store_lookup(url)
+        if mirror is not None:
+            try:
+                os.link(mirror, file_path)
+            except OSError:
+                shutil.copy2(mirror, file_path)
+            return str(file_path)
+
     # Check if file exists, if not download it
     if not osp.exists(file_path):
         if warn_missing:
@@ -840,9 +1421,8 @@ def download_if_missing(
             downloader.kwargs.setdefault("verify", False)
         _set_user_agent(downloader)
 
-        path = retrieve(
+        path = _retrieve_with_physionet_fallback(
             url,
-            None,
             fname=osp.basename(file_path),
             path=osp.dirname(file_path),
             downloader=downloader,
@@ -852,16 +1432,34 @@ def download_if_missing(
 
 
 def create_metainfo_osf(osf_code: str) -> pd.DataFrame:
-    """Create a metadata file for a dataset stored on OSF."""
+    """List every file of an OSF project's OSF storage.
+
+    Parameters
+    ----------
+    osf_code : str
+        OSF project (node) id, e.g. ``"r7s9b"``.
+
+    Returns
+    -------
+    metainfo : pandas.DataFrame
+        One row per file with columns ``filename`` (bare file name), ``url``
+        (download link) and ``path`` (the file's full path inside the
+        project, e.g. ``/sourcedata/sub-01/ses-01/eeg/sub-01_eeg.vhdr``).
+        A project can hold several files with the same name in different
+        folders; ``path`` tells them apart, ``filename`` does not. The row
+        order follows the OSF listing and is not guaranteed.
+    """
     # OSF API base URL for the project's OSF storage
 
     base_url = f"https://api.osf.io/v2/nodes/{osf_code}/files/osfstorage/"
 
-    files = []  # to collect (name, url) tuples
-    stack = [base_url + "?page[size]=100"]  # start with base URL, up to 100 results
+    files = []  # to collect (name, url, path) tuples
+    # (listing URL, folder path) pairs; start with the root, up to 100 results.
+    # The folder path is a fallback for items without ``materialized_path``.
+    stack = [(base_url + "?page[size]=100", "/")]
 
     while stack:
-        url = stack.pop()
+        url, folder_path = stack.pop()
         try:
             response = requests.get(url)
             data = response.json()
@@ -873,25 +1471,31 @@ def create_metainfo_osf(osf_code: str) -> pd.DataFrame:
         for item in data.get("data", []):
             attrs = item.get("attributes", {})
             kind = attrs.get("kind")
+            name = attrs.get("name")
+            item_path = attrs.get("materialized_path")
             if kind == "folder":
                 # If folder, add its listing URL to stack for later retrieval
                 rel = item.get("relationships", {})
                 files_rel = rel.get("files", {}) if rel else {}
                 folder_url = files_rel.get("links", {}).get("related", {}).get("href")
                 if folder_url:
+                    sub_path = item_path or f"{folder_path}{name}/"
+                    if not sub_path.endswith("/"):
+                        sub_path += "/"
                     # Append page[size]=100 to folder URL as well for efficiency
-                    stack.append(folder_url + "?page[size]=100")
+                    stack.append((folder_url + "?page[size]=100", sub_path))
             elif kind == "file":
-                name = attrs.get("name")
                 download_url = item.get("links", {}).get("download")
                 if name and download_url:
-                    files.append((name, download_url))
+                    files.append(
+                        (name, download_url, item_path or f"{folder_path}{name}")
+                    )
 
         # If there's a next page, add it to stack to continue pagination
         next_url = data.get("links", {}).get("next")
         if next_url:
-            stack.append(next_url)
+            stack.append((next_url, folder_path))
 
-    metainfo = pd.DataFrame(files, columns=["filename", "url"])
+    metainfo = pd.DataFrame(files, columns=["filename", "url", "path"])
 
     return metainfo

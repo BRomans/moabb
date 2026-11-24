@@ -29,6 +29,35 @@ Castillos2023_URL = "https://zenodo.org/records/8255618"
 
 TRIAL_PRESENTATION_TIME = 2.2
 
+# The released .set files use two 32-channel layouts with different labels and
+# channel order: the files of subjects 1, 5, 6, 7, 11 and 12 carry the
+# LiveAmp-32 labels (with F9, P9, P10 and F10), those of subjects 2, 3, 4, 8, 9
+# and 10 the actiCAP-32 labels (with FT9, TP9, TP10 and FT10). Every subject is
+# returned with the 28 electrodes both layouts share, in this order, so that
+# the same channel index is the same electrode for all subjects.
+_SHARED_EEG = [
+    "Fp1", "Fz", "F3", "F7", "FC5", "FC1", "C3", "T7", "CP5", "CP1", "Pz", "P3",
+    "P7", "O1", "Oz", "O2", "P8", "P4", "CP2", "CP6", "T8", "C4", "Cz", "FC2",
+    "FC6", "F8", "F4", "Fp2",
+]  # fmt: skip
+_LAYOUT_ONLY = {
+    "LiveAmp-32": ["F9", "P9", "P10", "F10"],
+    "actiCAP-32": ["FT9", "TP9", "TP10", "FT10"],
+}
+
+
+def _pick_shared_channels(raw, fpath):
+    """Keep the 28 electrodes of both released layouts, in ``_SHARED_EEG`` order."""
+    names = set(raw.ch_names)
+    extra = sorted(names - set(_SHARED_EEG))
+    known = any(sorted(e) == extra for e in _LAYOUT_ONLY.values())
+    if not set(_SHARED_EEG) <= names or not known:
+        raise ValueError(
+            f"Castillos2023 file {fpath} has channels {raw.ch_names}; expected the "
+            f"{len(_SHARED_EEG)} shared electrodes plus one of {_LAYOUT_ONLY}."
+        )
+    return raw.pick(_SHARED_EEG).reorder_channels(_SHARED_EEG)
+
 
 class BaseCastillos2023(BaseDataset):
     def __init__(
@@ -63,14 +92,15 @@ class BaseCastillos2023(BaseDataset):
         self.paradigm_type = paradigm_type
         self.sfreq = 500
         self.fps = 60
-        self.n_channels = 32
+        self.n_channels = len(_SHARED_EEG)
         self.window_size = window_size
 
     def _get_single_subject_data(self, subject):
         """Return the data of a single subject."""
         file_path_list = self.data_path(subject, self.paradigm_type)
         raw = mne.io.read_raw_eeglab(file_path_list[0], preload=True, verbose=False)
-        montage = mne.channels.make_standard_montage("standard_1020")
+        raw = _pick_shared_channels(raw, file_path_list[0])
+        montage = mne.channels.make_standard_montage("colin27_1020")
         raw = raw.set_montage(montage)
         # Strip the annotations that were script to make them easier to process
         events, event_id = mne.events_from_annotations(
@@ -111,7 +141,9 @@ class BaseCastillos2023(BaseDataset):
             preload=False,
             verbose=False,
         )
-        labels = epochs.events[..., -1]
+        # Copy: labels are made 0-based below, while epochs.events must keep
+        # the codes of event_id (MNE checks them when the data are read).
+        labels = epochs.events[..., -1].copy()
         onset_code = epochs.events[..., 0]
         labels -= np.min(labels)
         data = epochs.get_data()
@@ -180,8 +212,26 @@ class BaseCastillos2023(BaseDataset):
         subject_paths = []
 
         url = "https://zenodo.org/records/8255618/files/4Class-CVEP.zip"
-        path_zip = dl.data_dl(url, "4Class-VEP", path, force_update, verbose)
+        # All four classes share this one 0.6 GB ZIP and its extracted tree;
+        # each NEMAR deposit keeps its paradigm's members under the same
+        # 4Class-CVEP/ tree. Take the tree from the store before downloading
+        # (the cache folder is shared, so it is fetched at most once).
+        path_zip = str(dl.data_dl_destination(url, "4Class-VEP", path=path))
         path_folder = osp.join(osp.dirname(path_zip), "")
+        if not osp.isdir(path_folder + "4Class-CVEP"):
+            # Deposit layout is <subj>/... directly (no 4Class-CVEP/ level);
+            # the loader reads 4Class-CVEP/P<n>/..., so fill that level too.
+            dl.fill_tree_from_store(path_folder, "4Class-CVEP")
+        if not osp.isdir(path_folder + "4Class-CVEP"):
+            store_files = dl.store_glob(f"P{subject}/*_{paradigm_type}.*")
+            if store_files:
+                dl.fill_from_store(
+                    osp.join(path_folder, "4Class-CVEP"),
+                    [osp.join(path_folder, "4Class-CVEP", f) for f in store_files],
+                )
+        if not osp.isdir(path_folder + "4Class-CVEP"):
+            path_zip = dl.data_dl(url, "4Class-VEP", path, force_update, verbose)
+            path_folder = osp.join(osp.dirname(path_zip), "")
 
         # check if has to unzip
         if not (osp.isdir(path_folder + "4Class-CVEP")):
@@ -352,6 +402,16 @@ class CastillosBurstVEP100(BaseCastillos2023):
     intrusiveness using a mouse. In total, participants completed 12 ratings (3 repetitions x 4 types of stimuli) for
     each of the three scales.
 
+    **Channels**
+
+    The released files use two 32-channel layouts. The files of subjects 1, 5,
+    6, 7, 11 and 12 carry the labels of the LiveAmp-32 layout (F9, P9, P10,
+    F10), those of subjects 2, 3, 4, 8, 9 and 10 the labels of the actiCAP-32
+    layout (FT9, TP9, TP10, FT10), and the two layouts also store the channels
+    in a different order. The loader returns the 28 electrodes both layouts
+    share, in one fixed order, for every subject: Fp1, Fz, F3, F7, FC5, FC1, C3, T7, CP5, CP1, Pz, P3, P7, O1, Oz,
+    O2, P8, P4, CP2, CP6, T8, C4, Cz, FC2, FC6, F8, F4, Fp2.
+
     References
     ----------
 
@@ -374,7 +434,7 @@ class CastillosBurstVEP100(BaseCastillos2023):
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=500.0,
-            channel_types={"eeg": 32},
+            channel_types={"eeg": 28},
             sensors=[
                 "C3",
                 "C4",
@@ -383,12 +443,10 @@ class CastillosBurstVEP100(BaseCastillos2023):
                 "CP5",
                 "CP6",
                 "Cz",
-                "F10",
                 "F3",
                 "F4",
                 "F7",
                 "F8",
-                "F9",
                 "FC1",
                 "FC2",
                 "FC5",
@@ -399,12 +457,10 @@ class CastillosBurstVEP100(BaseCastillos2023):
                 "O1",
                 "O2",
                 "Oz",
-                "P10",
                 "P3",
                 "P4",
                 "P7",
                 "P8",
-                "P9",
                 "Pz",
                 "T7",
                 "T8",
@@ -413,15 +469,8 @@ class CastillosBurstVEP100(BaseCastillos2023):
             reference="FCz",
             ground="FPz",
             hardware="BrainProducts LiveAmp 32",
-            software=None,
-            filters={
-                "notch": {
-                    "freq": 50.0,
-                    "bandwidth": 0.2,
-                    "order": 16,
-                    "type": "IIR cut-band",
-                }
-            },
+            software="Lab Streaming Layer (LSL) / PsychoPy",
+            filters=None,
             line_freq=50.0,
             montage="standard_1020",
             impedance_threshold_kohm=25.0,
@@ -445,7 +494,7 @@ class CastillosBurstVEP100(BaseCastillos2023):
             bci_experience=None,
             sexes=None,
             handedness_list=None,
-            species="human",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             paradigm="cvep",
@@ -489,7 +538,7 @@ class CastillosBurstVEP100(BaseCastillos2023):
             country="FR",
             repository="Zenodo",
             data_url="https://zenodo.org/record/8255618",
-            license="CC BY",
+            license="CC-BY-4.0",
             publication_year=2023,
             senior_author="Frédéric Dehais",
             contact_info=["kalou.cabrera-castillos@isae-supaero.fr"],
@@ -581,7 +630,7 @@ class CastillosBurstVEP100(BaseCastillos2023):
             stimulus_frequencies_hz=None,
             frequency_resolution_hz=None,
             code_type="burst",
-            code_length=None,
+            code_length=132,
             n_targets=4,
             n_repetitions=None,
             isi_ms=None,
@@ -646,6 +695,16 @@ class CastillosBurstVEP40(BaseCastillos2023):
     intrusiveness using a mouse. In total, participants completed 12 ratings (3 repetitions x 4 types of stimuli) for
     each of the three scales.
 
+    **Channels**
+
+    The released files use two 32-channel layouts. The files of subjects 1, 5,
+    6, 7, 11 and 12 carry the labels of the LiveAmp-32 layout (F9, P9, P10,
+    F10), those of subjects 2, 3, 4, 8, 9 and 10 the labels of the actiCAP-32
+    layout (FT9, TP9, TP10, FT10), and the two layouts also store the channels
+    in a different order. The loader returns the 28 electrodes both layouts
+    share, in one fixed order, for every subject: Fp1, Fz, F3, F7, FC5, FC1, C3, T7, CP5, CP1, Pz, P3, P7, O1, Oz,
+    O2, P8, P4, CP2, CP6, T8, C4, Cz, FC2, FC6, F8, F4, Fp2.
+
     References
     ----------
 
@@ -668,7 +727,7 @@ class CastillosBurstVEP40(BaseCastillos2023):
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=500.0,
-            channel_types={"eeg": 32},
+            channel_types={"eeg": 28},
             sensors=[
                 "C3",
                 "C4",
@@ -677,12 +736,10 @@ class CastillosBurstVEP40(BaseCastillos2023):
                 "CP5",
                 "CP6",
                 "Cz",
-                "F10",
                 "F3",
                 "F4",
                 "F7",
                 "F8",
-                "F9",
                 "FC1",
                 "FC2",
                 "FC5",
@@ -693,12 +750,10 @@ class CastillosBurstVEP40(BaseCastillos2023):
                 "O1",
                 "O2",
                 "Oz",
-                "P10",
                 "P3",
                 "P4",
                 "P7",
                 "P8",
-                "P9",
                 "Pz",
                 "T7",
                 "T8",
@@ -707,10 +762,8 @@ class CastillosBurstVEP40(BaseCastillos2023):
             reference="FCz",
             ground="FPz",
             hardware="BrainProducts LiveAmp 32",
-            software=None,
-            filters={
-                "line_noise": "IIR cut-band filter between 49.9 and 50.1 Hz of order 16"
-            },
+            software="Lab Streaming Layer (LSL) / PsychoPy",
+            filters=None,
             line_freq=50.0,
             montage="standard_1020",
             impedance_threshold_kohm=25.0,
@@ -734,7 +787,7 @@ class CastillosBurstVEP40(BaseCastillos2023):
             bci_experience=None,
             sexes=None,
             handedness_list=None,
-            species="human",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             paradigm="cvep",
@@ -775,19 +828,23 @@ class CastillosBurstVEP40(BaseCastillos2023):
             country="FR",
             repository="Zenodo",
             data_url="https://zenodo.org/record/8255618",
-            license="CC BY",
+            license="CC-BY-4.0",
             publication_year=2023,
             senior_author="Frédéric Dehais",
             contact_info=["kalou.cabrera-castillos@isae-supaero.fr"],
             associated_paper_doi="10.1016/j.neuroimage.2023.120446",
-            funding=None,
+            funding=[
+                "AID (Powerbrain project), France",
+                "AXA Research Fund Chair for Neuroergonomics, France",
+                "Chair for Neuroadaptive Technology, Artificial and Natural Intelligence Toulouse Institute (ANITI), France",
+            ],
             institution_address="10 Av. Edouard Belin, Toulouse, 31400, France",
             institution_department="Human Factors and Neuroergonomics",
             ethics_approval=[
                 "University of Toulouse ethics committee (CER approval number 2020-334)",
                 "Declaration of Helsinki",
             ],
-            acknowledgements=None,
+            acknowledgements="This work was funded by AID (Powerbrain project), France, the AXA Research Fund Chair for Neuroergonomics, France and Chair for Neuroadaptive Technology, Artificial and Natural Intelligence Toulouse Institute (ANITI), France.",
             how_to_acknowledge=None,
             keywords=[
                 "Code-VEP",
@@ -831,7 +888,8 @@ class CastillosBurstVEP40(BaseCastillos2023):
             cv_method=None, cv_folds=None, evaluation_type=["offline"]
         ),
         performance={
-            "accuracy_percent": 95.6,
+            "accuracy_percent": 94.2,
+            "itr_bits_per_min": 62.713,
             "burst_100_accuracy_17.6s_calibration": 90.5,
             "burst_100_accuracy_52.8s_calibration": 95.6,
             "mseq_100_accuracy_17.6s_calibration": 71.4,
@@ -849,7 +907,7 @@ class CastillosBurstVEP40(BaseCastillos2023):
             stimulus_frequencies_hz=[2.0, 3.0, 4.0],
             frequency_resolution_hz=None,
             code_type="burst",
-            code_length=None,
+            code_length=132,
             n_targets=4,
             n_repetitions=None,
             isi_ms=None,
@@ -913,6 +971,16 @@ class CastillosCVEP100(BaseCastillos2023):
     intrusiveness using a mouse. In total, participants completed 12 ratings (3 repetitions x 4 types of stimuli) for
     each of the three scales.
 
+    **Channels**
+
+    The released files use two 32-channel layouts. The files of subjects 1, 5,
+    6, 7, 11 and 12 carry the labels of the LiveAmp-32 layout (F9, P9, P10,
+    F10), those of subjects 2, 3, 4, 8, 9 and 10 the labels of the actiCAP-32
+    layout (FT9, TP9, TP10, FT10), and the two layouts also store the channels
+    in a different order. The loader returns the 28 electrodes both layouts
+    share, in one fixed order, for every subject: Fp1, Fz, F3, F7, FC5, FC1, C3, T7, CP5, CP1, Pz, P3, P7, O1, Oz,
+    O2, P8, P4, CP2, CP6, T8, C4, Cz, FC2, FC6, F8, F4, Fp2.
+
     References
     ----------
 
@@ -935,7 +1003,7 @@ class CastillosCVEP100(BaseCastillos2023):
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=500.0,
-            channel_types={"eeg": 32},
+            channel_types={"eeg": 28},
             sensors=[
                 "C3",
                 "C4",
@@ -944,12 +1012,10 @@ class CastillosCVEP100(BaseCastillos2023):
                 "CP5",
                 "CP6",
                 "Cz",
-                "F10",
                 "F3",
                 "F4",
                 "F7",
                 "F8",
-                "F9",
                 "FC1",
                 "FC2",
                 "FC5",
@@ -960,12 +1026,10 @@ class CastillosCVEP100(BaseCastillos2023):
                 "O1",
                 "O2",
                 "Oz",
-                "P10",
                 "P3",
                 "P4",
                 "P7",
                 "P8",
-                "P9",
                 "Pz",
                 "T7",
                 "T8",
@@ -974,7 +1038,7 @@ class CastillosCVEP100(BaseCastillos2023):
             reference="FCz",
             ground="FPz",
             hardware="BrainProducts LiveAmp",
-            software=None,
+            software="Lab Streaming Layer (LSL) / PsychoPy",
             filters=None,
             line_freq=50.0,
             montage="standard_1020",
@@ -989,14 +1053,14 @@ class CastillosCVEP100(BaseCastillos2023):
             gender={"female": 4, "male": 8},
             age_mean=30.6,
             age_std=7.1,
-            species="human",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             paradigm="cvep",
             task_type="visual attention",
             events={"0": 100, "1": 101},
             n_classes=2,
-            class_labels=["target_1", "target_2", "target_3", "target_4"],
+            class_labels=["0", "1"],
             trial_duration=2.2,
             study_design="factorial design (code type × amplitude depth)",
             study_domain="BCI performance and user experience",
@@ -1035,7 +1099,7 @@ class CastillosCVEP100(BaseCastillos2023):
             country="FR",
             repository="Zenodo",
             data_url="https://zenodo.org/record/8255618",
-            license="CC BY",
+            license="CC-BY-4.0",
             publication_year=2023,
             senior_author="Frédéric Dehais",
             contact_info=["kalou.cabrera-castillos@isae-supaero.fr"],
@@ -1171,6 +1235,16 @@ class CastillosCVEP40(BaseCastillos2023):
     intrusiveness using a mouse. In total, participants completed 12 ratings (3 repetitions x 4 types of stimuli) for
     each of the three scales.
 
+    **Channels**
+
+    The released files use two 32-channel layouts. The files of subjects 1, 5,
+    6, 7, 11 and 12 carry the labels of the LiveAmp-32 layout (F9, P9, P10,
+    F10), those of subjects 2, 3, 4, 8, 9 and 10 the labels of the actiCAP-32
+    layout (FT9, TP9, TP10, FT10), and the two layouts also store the channels
+    in a different order. The loader returns the 28 electrodes both layouts
+    share, in one fixed order, for every subject: Fp1, Fz, F3, F7, FC5, FC1, C3, T7, CP5, CP1, Pz, P3, P7, O1, Oz,
+    O2, P8, P4, CP2, CP6, T8, C4, Cz, FC2, FC6, F8, F4, Fp2.
+
     References
     ----------
 
@@ -1193,7 +1267,7 @@ class CastillosCVEP40(BaseCastillos2023):
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=500.0,
-            channel_types={"eeg": 32},
+            channel_types={"eeg": 28},
             sensors=[
                 "C3",
                 "C4",
@@ -1202,12 +1276,10 @@ class CastillosCVEP40(BaseCastillos2023):
                 "CP5",
                 "CP6",
                 "Cz",
-                "F10",
                 "F3",
                 "F4",
                 "F7",
                 "F8",
-                "F9",
                 "FC1",
                 "FC2",
                 "FC5",
@@ -1218,12 +1290,10 @@ class CastillosCVEP40(BaseCastillos2023):
                 "O1",
                 "O2",
                 "Oz",
-                "P10",
                 "P3",
                 "P4",
                 "P7",
                 "P8",
-                "P9",
                 "Pz",
                 "T7",
                 "T8",
@@ -1232,8 +1302,8 @@ class CastillosCVEP40(BaseCastillos2023):
             reference="FCz",
             ground="FPz",
             hardware="BrainProducts LiveAmp 32",
-            software=None,
-            filters={"line_noise_filter": "IIR cut-band filter 49.9-50.1 Hz, order 16"},
+            software="Lab Streaming Layer (LSL) / PsychoPy",
+            filters=None,
             line_freq=50.0,
             montage="standard_1020",
             impedance_threshold_kohm=25.0,
@@ -1257,7 +1327,7 @@ class CastillosCVEP40(BaseCastillos2023):
             bci_experience=None,
             sexes=None,
             handedness_list=None,
-            species="human",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             paradigm="cvep",
@@ -1302,16 +1372,20 @@ class CastillosCVEP40(BaseCastillos2023):
             country="FR",
             repository="Zenodo",
             data_url="https://zenodo.org/record/8255618",
-            license="CC BY",
+            license="CC-BY-4.0",
             publication_year=2023,
             senior_author="Frédéric Dehais",
             contact_info=["kalou.cabrera-castillos@isae-supaero.fr"],
             associated_paper_doi="10.1016/j.neuroimage.2023.120446",
-            funding=None,
+            funding=[
+                "AID (Powerbrain project), France",
+                "AXA Research Fund Chair for Neuroergonomics, France",
+                "Chair for Neuroadaptive Technology, Artificial and Natural Intelligence Toulouse Institute (ANITI), France",
+            ],
             institution_address="10 Av. Edouard Belin, Toulouse, 31400, France",
             institution_department="Human Factors and Neuroergonomics",
             ethics_approval=["University of Toulouse CER approval number 2020-334"],
-            acknowledgements=None,
+            acknowledgements="This work was funded by AID (Powerbrain project), France, the AXA Research Fund Chair for Neuroergonomics, France and Chair for Neuroadaptive Technology, Artificial and Natural Intelligence Toulouse Institute (ANITI), France.",
             how_to_acknowledge=None,
             keywords=[
                 "Code-VEP",
@@ -1357,7 +1431,7 @@ class CastillosCVEP40(BaseCastillos2023):
             cv_method=None, cv_folds=None, evaluation_type=["offline"]
         ),
         performance={
-            "accuracy_percent": 95.6,
+            "itr_bits_per_min": 38.83,
             "burst_100_accuracy_17.6s_calibration": 90.5,
             "burst_100_accuracy_52.8s_calibration": 95.6,
             "burst_40_accuracy": 94.2,
@@ -1373,7 +1447,7 @@ class CastillosCVEP40(BaseCastillos2023):
             stimulus_frequencies_hz=None,
             frequency_resolution_hz=None,
             code_type="m-sequence",
-            code_length=None,
+            code_length=132,
             n_targets=4,
             n_repetitions=None,
             isi_ms=None,

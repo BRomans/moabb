@@ -11,7 +11,7 @@ import pandas as pd
 from sklearn.metrics import check_scoring, make_scorer
 from sklearn.pipeline import Pipeline
 
-from moabb.datasets.base import BaseDataset
+from moabb.datasets.base import BaseDataset, CacheConfig
 from moabb.datasets.bids_interface import StepType
 from moabb.datasets.preprocessing import (
     EpochsToEvents,
@@ -22,6 +22,7 @@ from moabb.datasets.preprocessing import (
     RawToEpochs,
     RawToEvents,
     SetRawAnnotations,
+    _keep_first_samples,
     get_crop_pipeline,
     get_filter_pipeline,
     get_resample_pipeline,
@@ -31,6 +32,66 @@ from moabb.utils import MoabbMetaClass
 
 
 log = logging.getLogger(__name__)
+
+
+def _cut_to_shortest(X, sfreq):
+    """Cut resampled epochs of several recordings to their shortest length.
+
+    Resampled epochs keep the window's number of samples, but a recording
+    downsampled by more than a factor of two can have one sample less (MNE
+    rounds the resampled length). Every epoch is then cut to the shortest
+    length so the recordings can be stacked: nothing is padded or invented.
+    """
+    if isinstance(X[0], mne.BaseEpochs):
+        n_times = [len(x.times) for x in X]
+    elif all(isinstance(x, np.ndarray) and x.ndim >= 3 for x in X):
+        n_times = [x.shape[2] for x in X]
+    else:  # e.g. features from a postprocess_pipeline: no time axis
+        return X
+    n_min = min(n_times)
+    if n_min == max(n_times):
+        return X
+    log.warning(
+        "Epochs resampled to %s Hz have %s samples, depending on the native "
+        "sampling rate of each recording; keeping the first %d samples of "
+        "every epoch so that they can be stacked.",
+        sfreq,
+        sorted(set(n_times)),
+        n_min,
+    )
+    return [
+        (
+            _keep_first_samples(x, n_min)
+            if isinstance(x, mne.BaseEpochs)
+            else x[:, :, :n_min]
+        )
+        for x in X
+    ]
+
+
+def _stack_trials(X):
+    """Stack the trial arrays of several recordings.
+
+    Recordings with the same channels and number of samples give one regular
+    array. Otherwise (e.g. datasets with different montages or sampling rates
+    pooled in a :class:`~moabb.datasets.compound_dataset.CompoundDataset`) the
+    result is a nested object array of shape ``(n_trials,)`` whose elements
+    are the ``(n_channels, n_times)`` arrays of each trial, as recorded.
+    """
+    if len({x.shape[1:] for x in X}) == 1:
+        return np.concatenate(X, axis=0)
+    shapes = sorted({x.shape[1:] for x in X})
+    log.warning(
+        "Recordings have different trial shapes %s: returning an object array "
+        "of shape (n_trials,) with one array per trial. Pipelines must accept "
+        "trials of different shapes.",
+        shapes,
+    )
+    trials = np.empty(sum(len(x) for x in X), dtype=object)
+    # ponytail: element-wise fill, numpy would broadcast same-shaped trials; replace if numpy adds ragged array constructor
+    for i, trial in enumerate(t for x in X for t in x):
+        trials[i] = trial
+    return trials
 
 
 def _normalize_scorer(scorer):
@@ -219,7 +280,13 @@ class BaseProcessing(metaclass=MoabbMetaClass):
         the dataset. Defaults to ``None``.
     resample : float or None
         If not None, resample the eeg data with the sampling rate provided.
-        Defaults to ``None``.
+        Resampled epochs have the number of samples :class:`mne.Epochs` gives
+        for the epoch window at that rate (e.g. 601 for 0-3 s at 200 Hz),
+        whatever the native sampling rate: samples that resampling places
+        after the window are dropped. Downsampling by more than a factor of
+        two can give one sample less (MNE rounds the resampled length); when
+        the recordings of one ``get_data`` call differ in this way, all epochs
+        are cut to the shortest length. Defaults to ``None``.
     overlap : float or None
         Overlap percentage (0-100) for the sliding window approach used in
         pseudo-online evaluation. If None, no overlap is applied. When overlap
@@ -425,10 +492,12 @@ class BaseProcessing(metaclass=MoabbMetaClass):
             List of subject number
         return_epochs: boolean
             This flag specifies whether to return only the data array or the
-            complete processed mne.Epochs
+            complete processed mne.Epochs. Epochs keep the MNE unit, volts
+            for EEG.
         return_raws: boolean
             To return raw files and events, to ensure compatibility with braindecode.
-            Mutually exclusive with return_epochs
+            Mutually exclusive with return_epochs. Raw objects keep the MNE
+            unit, volts for EEG.
         cache_config: dict | :class:`~moabb.datasets.base.CacheConfig`
             Configuration for caching of datasets. See :class:`~moabb.datasets.base.CacheConfig` for details.
         postprocess_pipeline: :class:`sklearn.pipeline.Pipeline` | None
@@ -461,10 +530,20 @@ class BaseProcessing(metaclass=MoabbMetaClass):
 
         Returns
         -------
-        X : :class:`numpy.ndarray` | :class:`mne.Epochs`
-            the data that will be used as features for the model
-            Note: if return_epochs=True, this is :class:`mne.Epochs`;
-            if return_epochs=False, this is :class:`numpy.ndarray`.
+        X : :class:`numpy.ndarray` | :class:`mne.Epochs` | list
+            The data that will be used as features for the model.
+            By default this is a :class:`numpy.ndarray` in microvolts:
+            the array from ``Epochs.get_data()`` is multiplied by
+            ``dataset.unit_factor`` (``1e6`` unless the dataset sets
+            another value), because MNE stores EEG in volts. Its shape
+            is ``(n_trials, n_channels, n_times)``, unless the recordings
+            have different channels or numbers of samples, in which case
+            it is an object array of shape ``(n_trials,)`` holding one
+            ``(n_channels, n_times)`` array per trial.
+            If return_epochs=True, this is :class:`mne.Epochs` in volts,
+            with no such scaling. If return_raws=True, this holds the
+            :class:`mne.io.BaseRaw` objects in volts. Do not compare
+            values across these return types without converting units.
         labels: :class:`numpy.ndarray`
             the labels for training / evaluating the model
         metadata: :class:`pandas.DataFrame`
@@ -499,21 +578,88 @@ class BaseProcessing(metaclass=MoabbMetaClass):
 
         labels_pipeline = self.make_labels_pipeline(dataset, return_epochs, return_raws)
 
-        data = [
-            dataset.get_data(
+        resolved_cache = CacheConfig.make(cache_config)
+        can_share_raw = (
+            len(process_pipelines) > 1
+            and not resolved_cache.use
+            and not any(
+                [
+                    resolved_cache.save_raw,
+                    resolved_cache.save_epochs,
+                    resolved_cache.save_array,
+                    resolved_cache.overwrite_raw,
+                    resolved_cache.overwrite_epochs,
+                    resolved_cache.overwrite_array,
+                ]
+            )
+            and all(
+                len(p.steps) >= 2
+                and isinstance(p.steps[0][1], SetRawAnnotations)
+                and p.steps[0][1].event_id == process_pipelines[0].steps[0][1].event_id
+                and p.steps[0][1].interval == process_pipelines[0].steps[0][1].interval
+                for p in process_pipelines
+            )
+        )
+        if can_share_raw:
+            raw_data = dataset.get_data(
                 subjects=subjects,
                 cache_config=cache_config,
-                process_pipeline=process_pipeline,
+                process_pipeline=FixedPipeline([process_pipelines[0].steps[0]]),
                 n_jobs=n_jobs,
             )
-            for process_pipeline in process_pipelines
-        ]
+            tail_pipelines = [FixedPipeline(p.steps[1:]) for p in process_pipelines]
+            data = [
+                {
+                    subj: {sess: {} for sess in sessions}
+                    for subj, sessions in raw_data.items()
+                }
+                for _ in tail_pipelines
+            ]
+            for subj, sessions in raw_data.items():
+                for sess, runs in sessions.items():
+                    for run_id, raw in runs.items():
+                        if raw is None:
+                            for d_i in data:
+                                d_i[subj][sess][run_id] = None
+                            continue
+                        if not getattr(raw, "preload", False):
+                            raw.load_data()
+                        orig_data = raw._data.copy()
+                        for idx, tail in enumerate(tail_pipelines):
+                            if idx > 0:
+                                raw._data[:] = orig_data
+                            r = (
+                                raw.copy()
+                                if return_raws and idx < len(tail_pipelines) - 1
+                                else raw
+                            )
+                            data[idx][subj][sess][run_id] = tail.transform(r)
+        else:
+            data = [
+                dataset.get_data(
+                    subjects=subjects,
+                    cache_config=cache_config,
+                    process_pipeline=process_pipeline,
+                    n_jobs=n_jobs,
+                )
+                for process_pipeline in process_pipelines
+            ]
 
         X = []
         labels = []
         metadata = []
+        meta_subjects = []
+        meta_sessions = []
+        meta_runs = []
+        meta_datasets = []
+        meta_devices = []
+        meta_counts = []
+        use_fast_meta = not additional_metadata and not return_epochs
+
         for subject, sessions in data[0].items():
+            src_code = dataset._source_code(subject)
             for session, runs in sessions.items():
+                dev_name = dataset._device(subject, session)
                 for run in runs.keys():
                     proc = [data_i[subject][session][run] for data_i in data]
 
@@ -557,10 +703,7 @@ class BaseProcessing(metaclass=MoabbMetaClass):
                         )  # XXX does it make sense to return labels for raws?
                         x = proc[0] if len(self.filters) == 1 else proc
                     else:  # return array
-                        assert all(
-                            np.array_equal(proc[0]["X"].shape, p["X"].shape)
-                            for p in proc[1:]
-                        )
+                        assert all(proc[0]["X"].shape == p["X"].shape for p in proc[1:])
                         assert all(
                             np.array_equal(proc[0]["events"], p["events"])
                             for p in proc[1:]
@@ -571,50 +714,90 @@ class BaseProcessing(metaclass=MoabbMetaClass):
                         x = (
                             proc[0]["X"]
                             if len(self.filters) == 1
-                            else np.array([p["X"] for p in proc]).transpose((1, 2, 3, 0))
+                            else np.stack([p["X"] for p in proc], axis=-1)
                         )
 
-                    met = pd.DataFrame(index=range(n))
-                    met["subject"] = subject
-                    met["session"] = session
-                    met["run"] = run
+                    if use_fast_meta:
+                        meta_subjects.append(subject)
+                        meta_sessions.append(session)
+                        meta_runs.append(run)
+                        meta_datasets.append(src_code)
+                        meta_devices.append(dev_name)
+                        meta_counts.append(n)
+                    else:
+                        met = pd.DataFrame(index=range(n))
+                        met["subject"] = subject
+                        met["session"] = session
+                        met["run"] = run
+                        met["dataset"] = src_code
+                        met["device"] = dev_name
 
-                    metadata.append(met)
+                        metadata.append(met)
 
-                    # overwrite if additional is required
-                    if additional_metadata:
-                        # extend the metadata according to the filters
+                        # overwrite if additional is required
+                        if additional_metadata:
+                            # extend the metadata according to the filters
 
-                        dmeta_ext = (
-                            ext_metadata[0].copy()
-                            if isinstance(ext_metadata[0], pd.DataFrame)
-                            else pd.DataFrame()
-                        )
-                        metadata[-1] = dmeta_ext
-
-                    if return_epochs:
-                        x.metadata = (
-                            metadata[-1].copy()
-                            if len(self.filters) == 1
-                            else pd.concat(
-                                [metadata[-1].copy()] * len(self.filters),
-                                ignore_index=True,
+                            dmeta_ext = (
+                                ext_metadata[0].copy()
+                                if isinstance(ext_metadata[0], pd.DataFrame)
+                                else pd.DataFrame()
                             )
-                        )
+                            metadata[-1] = dmeta_ext
+
+                        if return_epochs:
+                            x.metadata = (
+                                metadata[-1].copy()
+                                if len(self.filters) == 1
+                                else pd.concat(
+                                    [metadata[-1].copy()] * len(self.filters),
+                                    ignore_index=True,
+                                )
+                            )
 
                     X.append(x)
                     labels.append(lbs)
 
-        metadata = pd.concat(metadata, ignore_index=True)
+        if use_fast_meta:
+            if meta_counts:
+                counts = np.asarray(meta_counts, dtype=np.intp)
+                metadata = pd.DataFrame(
+                    {
+                        "subject": np.repeat(meta_subjects, counts),
+                        "session": np.repeat(meta_sessions, counts),
+                        "run": np.repeat(meta_runs, counts),
+                        "dataset": np.repeat(meta_datasets, counts),
+                        "device": np.repeat(meta_devices, counts),
+                    }
+                )
+            else:
+                metadata = pd.DataFrame(
+                    columns=["subject", "session", "run", "dataset", "device"]
+                )
+        else:
+            metadata = pd.concat(metadata, ignore_index=True)
         labels = np.concatenate(labels)
+        if (
+            self.resample is not None
+            and postprocess_pipeline is None
+            and not return_raws
+            and len(X) > 1
+        ):
+            X = _cut_to_shortest(X, self.resample)
         if return_epochs:
+            if len({(tuple(ep.ch_names), ep.info["sfreq"]) for ep in X}) > 1:
+                raise ValueError(
+                    "Recordings have different channels or sampling rates, which "
+                    "mne.Epochs cannot hold together; use return_epochs=False to get "
+                    "one array per trial."
+                )
             for ep in X:
                 ep.set_annotations(None)
             X = mne.concatenate_epochs(X)
         elif return_raws:
             pass
         else:
-            X = np.concatenate(X, axis=0)
+            X = _stack_trials(X)
         return X, labels, metadata
 
     def _get_raw_pipelines(self):
@@ -676,7 +859,9 @@ class BaseProcessing(metaclass=MoabbMetaClass):
         if bmin < tmin or bmax > tmax:
             steps.append(("crop", get_crop_pipeline(tmin=tmin, tmax=tmax)))
         if self.resample is not None:
-            steps.append(("resample", get_resample_pipeline(self.resample)))
+            steps.append(
+                ("resample", get_resample_pipeline(self.resample, tmin=tmin, tmax=tmax))
+            )
         if return_epochs:  # needed to concatenate epochs
             # MNE: mne.Epochs.load_data (preload epochs arrays into memory)
             steps.append(

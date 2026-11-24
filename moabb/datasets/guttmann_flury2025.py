@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import mne
@@ -19,6 +20,7 @@ from . import download as dl
 from .base import BaseDataset
 from .metadata.schema import (
     AcquisitionMetadata,
+    AuxiliaryChannelsMetadata,
     BCIApplicationMetadata,
     CrossValidationMetadata,
     DatasetMetadata,
@@ -147,11 +149,21 @@ _BIS_MAP = {
 # Shared documentation metadata.
 _DOCUMENTATION = DocumentationMetadata(
     doi=_DOI,
+    associated_paper_doi="10.7303/syn64005218",
     investigators=["Eva Guttmann-Flury", "Xinjun Sheng", "Xiangyang Zhu"],
+    senior_author="Xiangyang Zhu",
     institution="Shanghai Jiao Tong University",
+    institution_department="State Key Laboratory of Mechanical System and Vibration, School of Mechanical Engineering",
+    contact_info=["eva.guttmann.flury@gmail.com"],
     country="CN",
     publication_year=2025,
+    repository="Zenodo",
+    data_url="https://zenodo.org/records/18970793",
     license="CC0",
+    ethics_approval=[
+        "Institutional Review Board of Shanghai Jiao Tong University (Protocol No. IRB HRP E2021216I)"
+    ],
+    funding=["National Natural Science Foundation of China (Grant No. 91948302)"],
 )
 
 # Shared participant metadata.
@@ -159,24 +171,99 @@ _PARTICIPANTS = ParticipantMetadata(
     n_subjects=31,
     health_status="healthy",
     gender={"female": 11, "male": 20},
-    age_mean=28.3,
+    age_mean=29.0,
+    age_std=7.0,
     age_min=20.0,
     age_max=57.0,
-    species="human",
+    ages=[
+        30,
+        30,
+        25,
+        25,
+        23,
+        25,
+        20,
+        38,
+        29,
+        28,
+        29,
+        24,
+        23,
+        27,
+        24,
+        22,
+        24,
+        26,
+        32,
+        27,
+        36,
+        35,
+        23,
+        30,
+        26,
+        33,
+        25,
+        32,
+        32,
+        57,
+        28,
+    ],
+    sexes=[
+        "male",
+        "female",
+        "male",
+        "male",
+        "male",
+        "female",
+        "male",
+        "male",
+        "male",
+        "male",
+        "male",
+        "male",
+        "female",
+        "male",
+        "female",
+        "female",
+        "female",
+        "male",
+        "male",
+        "male",
+        "male",
+        "female",
+        "male",
+        "male",
+        "female",
+        "male",
+        "female",
+        "male",
+        "female",
+        "female",
+        "male",
+    ],
+    handedness={"right": 25, "left": 2, "ambidextrous": 4},
+    bci_experience="mixed",
+    species="homo sapiens",
 )
 
 # Shared acquisition metadata.
 _ACQUISITION = AcquisitionMetadata(
     sampling_rate=1000.0,
-    channel_types={"eeg": 64, "eog": 1},
+    # Paper: "65-channel Quik-cap ... with 62 EEG electrodes positioned
+    # accordingly"; the loader re-types CB1/CB2 as misc (60 EEG at runtime).
+    channel_types={"eeg": 62, "eog": 1},
     montage="standard_1005",
     hardware="Neuroscan Quik-Cap 65-ch, SynAmps2",
+    software="Neuroscan, E-Prime, Tobii, Phantom",
     sensor_type="Ag/AgCl",
     reference="right mastoid (M1)",
     ground="forehead",
     filters={"highpass_time_constant_s": 10},
     sensors=list(_CH_NAMES),
     line_freq=50.0,
+    auxiliary_channels=AuxiliaryChannelsMetadata(
+        has_eog=True, eog_channels=1, eog_type=["vertical"], has_emg=True, emg_channels=2
+    ),
 )
 
 
@@ -216,6 +303,13 @@ def _data_path_for_paradigm(
     path = dl.get_dataset_path(sign, path)
     basepath = Path(path) / "MNE-guttmannflury2025-data"
     subj_dir = basepath / paradigm / f"S{subject:02d}"
+
+    # Some deposits nest the subject once more (``S05/S05/Sess01/...``,
+    # from extracting ``S05.zip`` into ``S05/``); a seeded store then holds
+    # that nested tree instead of the flat one checked below.
+    nested_dir = subj_dir / f"S{subject:02d}"
+    if not force_update and nested_dir.is_dir() and any(nested_dir.rglob("*.bdf")):
+        return str(nested_dir)
 
     # Check if BDF files already exist for this subject.
     n_sess = _SESSIONS_PER_SUBJECT.get(subject, 1)
@@ -507,6 +601,7 @@ class GuttmannFlury2025_MI(BaseDataset):
     """
 
     nemar_id = "nm000265"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=_ACQUISITION,
         participants=_PARTICIPANTS,
@@ -655,8 +750,24 @@ class GuttmannFlury2025_ME(BaseDataset):
     See :class:`GuttmannFlury2025_MI` for full documentation.
     """
 
-    METADATA = GuttmannFlury2025_MI.METADATA
+    METADATA = replace(
+        GuttmannFlury2025_MI.METADATA,
+        documentation=replace(
+            _DOCUMENTATION, data_url="https://zenodo.org/records/18971758"
+        ),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="motor_execution",
+            imagery_tasks=["left_hand", "right_hand"],
+            cue_duration_s=2.0,
+            imagery_duration_s=4.0,
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials=2519,
+            trials_context="80 per subject (2,519 total across 31 subjects; initial trial of ME041 is missing in EEG)",
+        ),
+    )
     nemar_id = "nm000227"
+    nemar_seed_cache = True
 
     def __init__(self, subjects=None, sessions=None, *, return_all_modalities=False):
         super().__init__(
@@ -726,6 +837,7 @@ class GuttmannFlury2025_SSVEP(BaseDataset):
     """
 
     nemar_id = "nm000310"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=_ACQUISITION,
         participants=_PARTICIPANTS,
@@ -737,25 +849,28 @@ class GuttmannFlury2025_SSVEP(BaseDataset):
             trial_duration=7.0,
             study_design=(
                 "Multi-paradigm BCI (MI/ME/SSVEP/P300). "
-                "SSVEP: 4-class frequency flickering, 48 trials/session, "
+                "SSVEP: 4-class frequency flickering, 40 trials/session, "
                 "up to 3 sessions per subject."
             ),
             feedback_type="none",
-            stimulus_type="flickering LED",
+            stimulus_type="checkerboard",
             stimulus_modalities=["visual"],
             primary_modality="visual",
             synchronicity="synchronous",
             mode="offline",
         ),
-        documentation=_DOCUMENTATION,
+        documentation=replace(
+            _DOCUMENTATION, data_url="https://zenodo.org/records/18978288"
+        ),
         sessions_per_subject=3,
         runs_per_session=1,
         tags=Tags(pathology=["Healthy"], modality=["Visual"], type=["Research"]),
         paradigm_specific=ParadigmSpecificMetadata(
-            detected_paradigm="ssvep", stimulus_frequencies_hz=[8.0, 10.0, 12.0, 15.0]
+            detected_paradigm="ssvep", stimulus_frequencies_hz=[10.0, 11.0, 12.0, 13.0]
         ),
         data_structure=DataStructureMetadata(
-            n_trials=3024, trials_context="63 sessions x 48 trials = 3024"
+            n_trials=2520,
+            trials_context="63 sessions x 40 trials = 2520 (paper: 'the other tasks had 40 trials'; 10 per frequency)",
         ),
         bci_application=BCIApplicationMetadata(
             applications=["communication"], environment="laboratory"
@@ -867,15 +982,20 @@ class GuttmannFlury2025_P300(BaseDataset):
     and high-speed video for ocular activity analysis across BCI
     paradigms* [1]_.
 
-    This adapter loads the **P300 speller** paradigm. Two grid sizes
-    were tested: 4-letter (P3004L) and 5-letter (P3005L). Events are
-    decoded from the ``_annotations.json`` sidecar.
+    This adapter loads the **P300 speller** paradigm, which uses a 6x6
+    (36-symbol) character matrix with the Checkerboard Paradigm (CBP;
+    each flash highlights a subset of 6 symbols, with 3 flash cycles
+    per target). Two word-spelling variants were recorded: spelling 10
+    four-letter words (``P3004L``, 40 trials) and spelling 10
+    five-letter words (``P3005L``, 50 trials). Events are decoded from
+    the ``_annotations.json`` sidecar.
 
     Parameters
     ----------
     grid_size : str (default "4L")
-        Speller grid size: ``"4L"`` for 4-letter grid or ``"5L"`` for
-        5-letter grid.
+        Word-length variant: ``"4L"`` for the four-letter word spelling
+        task (``P3004L``) or ``"5L"`` for the five-letter word spelling
+        task (``P3005L``). Kept as ``grid_size`` for backward compatibility.
     subjects : list of int | None
         List of subject numbers to load. Default loads all 31.
     sessions : list of int | None
@@ -890,30 +1010,37 @@ class GuttmannFlury2025_P300(BaseDataset):
     """
 
     nemar_id = "nm000136"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=_ACQUISITION,
         participants=_PARTICIPANTS,
         experiment=ExperimentMetadata(
+            trial_duration=1.0,
             events=dict(_P300_EVENTS),
             paradigm="p300",
             n_classes=2,
             class_labels=["Target", "NonTarget"],
             study_design=(
                 "Multi-paradigm BCI (MI/ME/SSVEP/P300). "
-                "P300: row/column speller with 4L and 5L grid sizes."
+                "P300: 6x6 checkerboard paradigm (CBP) speller with "
+                "four-letter (P3004L) and five-letter (P3005L) word spelling tasks."
             ),
             feedback_type="none",
-            stimulus_type="row-column flash",
+            stimulus_type="checkerboard flash",
             stimulus_modalities=["visual"],
             primary_modality="visual",
             synchronicity="synchronous",
             mode="offline",
         ),
-        documentation=_DOCUMENTATION,
+        documentation=replace(
+            _DOCUMENTATION, data_url="https://zenodo.org/records/18980192"
+        ),
         sessions_per_subject=3,
         runs_per_session=1,
         tags=Tags(pathology=["Healthy"], modality=["ERP"], type=["Research"]),
-        paradigm_specific=ParadigmSpecificMetadata(detected_paradigm="p300"),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="p300", n_targets=36, n_repetitions=3
+        ),
         data_structure=DataStructureMetadata(
             n_trials=2520,
             trials_context="63 sessions x 40 trials = 2520 (P300-4L default)",

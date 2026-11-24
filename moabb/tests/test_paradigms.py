@@ -26,6 +26,8 @@ from moabb.paradigms import (
     BaseMotorImagery,
     BaseP300,
     BaseSSVEP,
+    CognitiveTask,
+    FakeCognitiveParadigm,
     FakeCVEPParadigm,
     FilterBankCVEP,
     FilterBankFixedIntervalWindowsProcessing,
@@ -533,6 +535,25 @@ class TestMotorImagery(unittest.TestCase):
         with pytest.raises(ValueError):
             FilterBankMotorImagery(n_classes=3, events=["hands", "feet"])
 
+    def test_MotorImagery_used_events_respects_n_classes(self):
+        # FakeDataset(paradigm="imagery") has 3 events by default; with
+        # events=None, used_events must stop at n_classes like its
+        # FilterBankMotorImagery sibling does, not collect every event.
+        dataset = FakeDataset(paradigm="imagery")
+        paradigm = MotorImagery(n_classes=2, events=None)
+        used = paradigm.used_events(dataset)
+        assert len(used) == 2, used
+
+        fb_paradigm = FilterBankMotorImagery(n_classes=2, events=None)
+        fb_used = fb_paradigm.used_events(dataset)
+        assert used == fb_used, (used, fb_used)
+
+        # n_classes filled in from a first 2-class dataset must not cut a
+        # later 3-class dataset down to 2 events.
+        auto = MotorImagery()
+        auto.used_events(FakeDataset(["a", "b"], paradigm="imagery"))
+        assert len(auto.used_events(dataset)) == 3
+
     def test_FilterBankLeftRightImagery_paradigm(self):
         # can work with filter bank
         paradigm = FilterBankLeftRightImagery()
@@ -733,6 +754,52 @@ class TestP300:
         # should return epochs
         epochs, _, _ = paradigm.get_data(dataset, subjects=[1], return_epochs=True)
         assert isinstance(epochs, BaseEpochs)
+
+
+class TestCognitiveTask:
+    def test_is_valid(self):
+        paradigm = CognitiveTask(events=["horizontal", "vertical"], n_classes=2)
+        events = ["horizontal", "vertical", "turning"]
+        assert paradigm.is_valid(FakeDataset(paradigm="cognitive", event_list=events))
+        # existing imagery tag stays valid (e.g. Wang2026Handwriting)
+        assert paradigm.is_valid(FakeDataset(paradigm="imagery", event_list=events))
+        assert not paradigm.is_valid(
+            FakeDataset(paradigm="p300", event_list=["Target", "NonTarget"])
+        )
+
+    def test_used_events_n_classes(self):
+        paradigm = CognitiveTask(
+            events=["horizontal", "vertical", "turning"], n_classes=2
+        )
+        dataset = FakeDataset(
+            paradigm="cognitive", event_list=["horizontal", "vertical", "turning"]
+        )
+        assert list(paradigm.used_events(dataset)) == ["horizontal", "vertical"]
+        with pytest.raises(ValueError, match="did not have enough"):
+            CognitiveTask(events=["horizontal", "missing"], n_classes=2).used_events(
+                dataset
+            )
+
+    def test_paradigm_get_data(self):
+        paradigm = CognitiveTask(n_classes=3)
+        dataset = FakeDataset(paradigm="cognitive")
+        X, labels, metadata = paradigm.get_data(dataset, subjects=[1])
+        assert len(X) == len(labels) == len(metadata)
+        assert len(X.shape) == 3
+        assert len(np.unique(labels)) == 3
+        assert "subject" in metadata.columns
+        epochs, _, _ = paradigm.get_data(dataset, subjects=[1], return_epochs=True)
+        assert isinstance(epochs, BaseEpochs)
+
+    def test_scoring(self):
+        assert CognitiveTask(n_classes=2).scoring == "roc_auc"
+        assert CognitiveTask(n_classes=5).scoring == "accuracy"
+
+    def test_fake_paradigm(self):
+        paradigm = FakeCognitiveParadigm()
+        assert len(paradigm.datasets) == 1
+        assert paradigm.is_valid(FakeDataset(paradigm="cognitive"))
+        assert paradigm.is_valid(FakeDataset(paradigm="imagery"))
 
 
 class TestRestingState:
@@ -1481,7 +1548,9 @@ class TestMetadata:
         assert (raw_metadata == epo2.metadata).all().all()
         assert (metadata2 == epo2.metadata).all().all()
 
-        assert (metadata1.columns == ["subject", "session", "run"]).all()
+        assert (
+            metadata1.columns == ["subject", "session", "run", "dataset", "device"]
+        ).all()
 
         assert "value" in metadata2.columns
         assert "value" in metadata3.columns
@@ -1571,3 +1640,120 @@ class TestMetadata:
         # Verify specific extra fields are present
         non_empty = [e for e in raw_out.annotations.extras if len(e) > 0]
         assert all("value" in e and "custom_col" in e for e in non_empty)
+
+
+def test_metadata_has_the_dataset_of_each_trial():
+    from moabb.datasets.compound_dataset import CompoundDataset
+
+    a, b = (
+        FakeDataset(["left_hand", "right_hand"], n_subjects=1, n_sessions=1, seed=s)
+        for s in (1, 2)
+    )
+    b.code = "FakeDatasetB"
+    paradigm = LeftRightImagery()
+    _, _, metadata = paradigm.get_data(a)
+    assert set(metadata["dataset"]) == {a.code}
+
+    pool = CompoundDataset(
+        [(a, 1, None, None), (b, 1, None, None)],
+        code="CompoundDatasetAB",
+        interval=a.interval,
+    )
+    _, _, metadata = paradigm.get_data(pool)
+    assert metadata.groupby("subject")["dataset"].unique().map(tuple).to_dict() == {
+        1: (a.code,),
+        2: (b.code,),
+    }
+
+
+def _two_systems():
+    """A pool of two recordings setups with different montages and rates."""
+    from moabb.datasets.compound_dataset import CompoundDataset
+
+    a = FakeDataset(
+        ["left_hand", "right_hand"],
+        channels=("C3", "Cz", "C4", "Pz"),
+        n_subjects=1,
+        n_sessions=1,
+        sfreq=128,
+    )
+    b = FakeDataset(
+        ["left_hand", "right_hand"],
+        channels=("C3", "Cz", "C4"),
+        n_subjects=1,
+        n_sessions=1,
+        sfreq=256,
+    )
+    return CompoundDataset(
+        [(a, 1, None, None), (b, 1, None, None)],
+        code="CompoundDatasetTwoSystems",
+        interval=a.interval,
+    )
+
+
+def test_recordings_of_different_shapes_give_nested_trials():
+    X, y, metadata = LeftRightImagery().get_data(_two_systems())
+
+    assert X.dtype == object and X.shape == (len(y),) == (len(metadata),)
+    shapes = {trial.shape for trial in X}
+    assert shapes == {(4, 385), (3, 769)}
+    # Same shapes still stack into a regular array.
+    X, _, _ = LeftRightImagery(channels=["C3", "Cz", "C4"], resample=128).get_data(
+        _two_systems()
+    )
+    assert X.dtype != object and X.shape[1] == 3
+
+
+def test_epochs_of_different_shapes_raise_clearly():
+    with pytest.raises(ValueError, match="return_epochs=False"):
+        LeftRightImagery().get_data(_two_systems(), return_epochs=True)
+
+
+@pytest.mark.parametrize(
+    "hardware, device",
+    [
+        ("g.USBamp (g.tec, Schiedlberg, Austria)", "g.tec g.USBamp"),
+        ("g.tec g.USBamp (serial UB-2016.05.01)", "g.tec g.USBamp"),
+        ("BrainProducts BrainAmp MR plus", "Brain Products BrainAmp"),
+        ("Brain Products actiCHamp (128-channel actiCAP)", "Brain Products actiCHamp"),
+        ("g.tec medical engineering GmbH", "g.tec (model not given)"),
+        ("Magstim EGI GES400", "EGI Geodesic Net Amps"),
+        ("Deymed TruScan 32", "Deymed TruScan 32"),
+        (None, "unknown"),
+    ],
+)
+def test_canonical_device(hardware, device):
+    from moabb.datasets.metadata.devices import canonical_device
+
+    assert canonical_device(hardware) == device
+
+
+def test_metadata_has_the_device_of_each_session():
+    from moabb.datasets.compound_dataset import CompoundDataset
+
+    a, b = (
+        FakeDataset(["left_hand", "right_hand"], n_subjects=1, n_sessions=2, seed=s)
+        for s in (1, 2)
+    )
+    b.code = "FakeDatasetB"
+    paradigm = LeftRightImagery()
+    _, _, metadata = paradigm.get_data(a)
+    assert set(metadata["device"]) == {"unknown"}  # FakeDataset gives no hardware
+
+    # One dataset can switch device between sessions, and devices are shared
+    # across datasets: the column follows the device, not the dataset.
+    a._device = lambda subject, session: "Amp X" if session == "0" else "Amp Y"
+    b._device = lambda subject, session: "Amp X"
+    pool = CompoundDataset(
+        [(a, 1, None, None), (b, 1, None, None)],
+        code="CompoundDatasetAB",
+        interval=a.interval,
+    )
+    _, _, metadata = paradigm.get_data(pool)
+    pairs = set(zip(metadata["dataset"], metadata["session"], metadata["device"]))
+    assert pairs == {
+        (a.code, "0", "Amp X"),
+        (a.code, "1", "Amp Y"),
+        (b.code, "0", "Amp X"),
+        (b.code, "1", "Amp X"),
+    }

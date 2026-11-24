@@ -94,7 +94,7 @@ class Sosulski2019(BaseDataset):
         acquisition=AcquisitionMetadata(
             sampling_rate=1000.0,
             channel_types={"eeg": 31, "eog": 1, "misc": 5},
-            montage="standard_1020",
+            montage="standard_1005",
             hardware="BrainProducts BrainAmp DC",
             sensor_type="passive Ag/AgCl",
             reference="nose",
@@ -142,6 +142,10 @@ class Sosulski2019(BaseDataset):
             auxiliary_channels=AuxiliaryChannelsMetadata(
                 has_eog=True, eog_channels=1, eog_type=["vertical"]
             ),
+            impedance_threshold_kohm=20.0,
+            cap_manufacturer="EasyCap",
+            electrode_type="passive",
+            electrode_material="Ag/AgCl",
         ),
         participants=ParticipantMetadata(
             n_subjects=13,
@@ -157,8 +161,8 @@ class Sosulski2019(BaseDataset):
             events={"Target": 21, "NonTarget": 1},
             paradigm="p300",
             n_classes=2,
-            class_labels=["target", "non-target"],
-            trial_duration=None,
+            class_labels=["Target", "NonTarget"],
+            trial_duration=1.2,
             study_design="Subjects focused attention on target tones (1000 Hz) and ignored non-target tones (500 Hz) presented via speaker at 65 cm distance. One trial consisted of 15 target and 75 non-target stimuli in pseudo-random order with at least two non-target tones between target tones. The experiment was split into optimization and validation parts.",
             stimulus_type="oddball",
             stimulus_modalities=["auditory"],
@@ -174,7 +178,9 @@ class Sosulski2019(BaseDataset):
             instructions="Focus on the target tones (1000 Hz) and ignore the non-target tones (500 Hz). Refrain from blinking and movement as much as possible.",
         ),
         documentation=DocumentationMetadata(
-            doi="10.48550/arXiv.2109.06011",
+            doi="10.6094/UNIFR/154576",
+            associated_paper_doi="10.48550/arXiv.2109.06011",
+            related_paper_dois=["10.48550/arXiv.2109.06011"],
             description="Auditory oddball ERP dataset from 13 healthy subjects. Two sinusoidal tones (target 1000 Hz, non-target 500 Hz) presented at various stimulus onset asynchronies (SOAs, 60-600 ms). 31-channel EEG recorded at 1000 Hz with BrainProducts BrainAmp DC. Raw BrainVision format data.",
             investigators=[
                 "Jan Sosulski",
@@ -214,7 +220,9 @@ class Sosulski2019(BaseDataset):
             repository="FreiDok",
         ),
         tags=Tags(pathology=["Healthy"], modality=["Auditory"], type=["Research"]),
-        preprocessing=PreprocessingMetadata(),
+        preprocessing=PreprocessingMetadata(
+            data_state="raw", preprocessing_applied=False
+        ),
         signal_processing=SignalProcessingMetadata(
             classifiers=["rLDA", "Shrinkage LDA"],
             feature_extraction=["Mean amplitude in time intervals"],
@@ -333,11 +341,11 @@ class Sosulski2019(BaseDataset):
         return trial_info
 
     def _get_single_run_data(self, file_path):
-        non_scalp_channels = ["EOGvu", "x_EMGl", "x_GSR", "x_Respi", "x_Pulse", "x_Optic"]
+        misc_channels = ["x_EMGl", "x_GSR", "x_Respi", "x_Pulse", "x_Optic"]
         raw = mne.io.read_raw_brainvision(
-            file_path, misc=non_scalp_channels, preload=True
+            file_path, eog=["EOGvu"], misc=misc_channels, preload=True
         )
-        raw.set_montage("standard_1020")
+        raw.set_montage("colin27_1020")
         if self.reject_non_iid:
             raw.set_annotations(raw.annotations[7:85])  # non-iid rejection
         raw.annotations.rename(self.description_map)
@@ -377,34 +385,44 @@ class Sosulski2019(BaseDataset):
         if subject not in self.subject_list:
             raise (ValueError("Invalid subject number"))
 
-        # Download the main ZIP file containing all subjects
-        path_zip = dl.data_dl(
-            SPOT_PILOT_P300_URL,
-            "spot",
-            path=path,
-            force_update=force_update,
-            verbose=verbose,
-        )
-        path_base = os.path.dirname(path_zip)
-        path_extracted = os.path.join(path_base, "extracted")
-
-        # Extract main ZIP if not already done
-        if force_update or not os.path.isdir(path_extracted):
-            with zipfile.ZipFile(path_zip, "r") as zip_ref:
-                zip_ref.extractall(path_extracted)
-
-        # Find and extract subject-specific ZIP
-        subject_zip_name = f"subject{subject}.zip"
-        subject_zip_path = os.path.join(path_extracted, subject_zip_name)
-        path_folder = os.path.join(path_extracted, f"subject{subject}")
-
-        if force_update or not os.path.isdir(path_folder):
-            if os.path.exists(subject_zip_path):
-                with zipfile.ZipFile(subject_zip_path, "r") as zip_ref:
-                    zip_ref.extractall(path_extracted)
-
-        # get the path to all files
         # We only load data from the second run. The first run is a potpourri of SOAs
         pattern = "/*Run_2*.vhdr"
+        path_base = os.path.dirname(
+            dl.data_dl_destination(SPOT_PILOT_P300_URL, "spot", path=path)
+        )
+        path_extracted = os.path.join(path_base, "extracted")
+        path_folder = os.path.join(path_extracted, f"subject{subject}")
+        # NEMAR deposits keep the extracted subject directory, not the archive:
+        # take it from the local store (or a previous extraction) first.
+        if force_update or not (
+            dl.fill_tree_from_store(path_extracted, f"subject{subject}")
+            or glob.glob(path_folder + pattern)
+        ):
+            # Download the main ZIP file containing all subjects
+            path_zip = dl.data_dl(
+                SPOT_PILOT_P300_URL,
+                "spot",
+                path=path,
+                force_update=force_update,
+                verbose=verbose,
+            )
+            path_base = os.path.dirname(path_zip)
+            path_extracted = os.path.join(path_base, "extracted")
+            path_folder = os.path.join(path_extracted, f"subject{subject}")
+
+            # Extract main ZIP if not already done (subjects taken from the
+            # store leave "extracted" without the per-subject ZIPs).
+            subject_zip_path = os.path.join(path_extracted, f"subject{subject}.zip")
+            if force_update or not os.path.exists(subject_zip_path):
+                with zipfile.ZipFile(path_zip, "r") as zip_ref:
+                    zip_ref.extractall(path_extracted)
+
+            # Find and extract subject-specific ZIP
+            if force_update or not os.path.isdir(path_folder):
+                if os.path.exists(subject_zip_path):
+                    with zipfile.ZipFile(subject_zip_path, "r") as zip_ref:
+                        zip_ref.extractall(path_extracted)
+
+        # get the path to all files
         subject_paths = glob.glob(path_folder + pattern)
         return sorted(subject_paths)

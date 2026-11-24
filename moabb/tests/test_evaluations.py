@@ -1,8 +1,11 @@
+import json
 import os
 import os.path as osp
+import pickle
 import platform
 import warnings
 from collections import OrderedDict
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -13,12 +16,15 @@ from pyriemann.spatialfilters import CSP
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.dummy import DummyClassifier as Dummy
 from sklearn.model_selection import (
+    BaseCrossValidator,
+    GridSearchCV,
     GroupKFold,
     GroupShuffleSplit,
     LeaveOneGroupOut,
     PredefinedSplit,
 )
 from sklearn.pipeline import FunctionTransformer, Pipeline, make_pipeline
+from sklearn.utils.validation import check_is_fitted
 
 from moabb.analysis.results import get_digest, get_string_rep
 from moabb.datasets.compound_dataset import compound
@@ -27,8 +33,11 @@ from moabb.evaluations import evaluations as ev
 from moabb.evaluations.base import BaseEvaluation, optuna_available
 from moabb.evaluations.splitters import LearningCurveSplitter
 from moabb.evaluations.utils import _create_save_path as create_save_path
+from moabb.evaluations.utils import _pipeline_requires_epochs
 from moabb.evaluations.utils import _save_model_cv as save_model_cv
+from moabb.paradigms import SSVEP
 from moabb.paradigms.motor_imagery import FakeImageryParadigm
+from moabb.pipelines import classification
 
 
 def _identity(x):
@@ -60,6 +69,171 @@ class PositionalOnlyGroupKFold(GroupKFold):
 
     def __init__(self, n_splits=2, /, **kwargs):
         super().__init__(n_splits=n_splits, **kwargs)
+
+
+class HeldOutSubjectSplitter(BaseCrossValidator):
+    """Minimal top-level splitter that holds out one chosen subject."""
+
+    metadata_columns = ("held_out_subject",)
+
+    def __init__(self, subject):
+        self.subject = subject
+        self._metadata = None
+
+    def split(self, y, metadata):
+        del y
+        positions = np.arange(len(metadata))
+        test_mask = metadata["subject"].to_numpy() == self.subject
+        self._metadata = {"held_out_subject": self.subject}
+        yield positions[~test_mask], positions[test_mask]
+
+    def get_n_splits(self, *args, **kwargs):
+        return 1
+
+    def get_metadata(self):
+        return self._metadata
+
+
+class TargetSubjectSessionSplitter(BaseCrossValidator):
+    """Metadata-aware splitter: train on other subjects, test one target session.
+
+    The target's remaining sessions are excluded from both train and test
+    (the 3-way case from issue #1104).
+    """
+
+    metadata_columns = ("target_subject",)
+
+    def __init__(self, target, test_session):
+        self.target = target
+        self.test_session = test_session
+
+    def split(self, y, metadata):
+        del y
+        subject = metadata["subject"].to_numpy()
+        session = metadata["session"].to_numpy()
+        positions = np.arange(len(metadata))
+        test = (subject == self.target) & (session == self.test_session)
+        yield positions[subject != self.target], positions[test]
+
+    def get_n_splits(self, *args, **kwargs):
+        return 1
+
+    def get_metadata(self):
+        return {"target_subject": self.target}
+
+
+class ThreeWayHeldOutSubjectSplitter(BaseCrossValidator):
+    """Hold out one subject and split its labels into calibration/test slices."""
+
+    metadata_columns = ("calibration_size", "calibration_labeled")
+
+    def __init__(self, subject):
+        self.subject = subject
+        self._metadata = None
+
+    def split(self, y, metadata):
+        positions = np.arange(len(metadata))
+        target = positions[metadata["subject"].to_numpy() == self.subject]
+        train = positions[metadata["subject"].to_numpy() != self.subject]
+
+        calibration_parts = []
+        test_parts = []
+        target_y = np.asarray(y)[target]
+        for label in np.unique(target_y):
+            label_positions = target[target_y == label]
+            split_at = max(1, len(label_positions) // 2)
+            split_at = min(split_at, len(label_positions) - 1)
+            calibration_parts.append(label_positions[:split_at])
+            test_parts.append(label_positions[split_at:])
+
+        calibration = np.sort(np.concatenate(calibration_parts))
+        test = np.sort(np.concatenate(test_parts))
+        self._metadata = {
+            "calibration_size": len(calibration) / (len(calibration) + len(test)),
+            "calibration_labeled": False,
+        }
+        yield train, calibration, test
+
+    def get_n_splits(self, *args, **kwargs):
+        return 1
+
+    def get_metadata(self):
+        return self._metadata
+
+
+class MultiSubjectTestSplitter(BaseCrossValidator):
+    """Deliberately invalid splitter with two subjects in one test fold."""
+
+    def split(self, y, metadata):
+        del y
+        positions = np.arange(len(metadata))
+        test_mask = metadata["subject"].isin([2, 3]).to_numpy()
+        yield positions[~test_mask], positions[test_mask]
+
+    def get_n_splits(self, *args, **kwargs):
+        return 1
+
+
+class ReusedNestedMetadataSplitter(BaseCrossValidator):
+    """Reuse and mutate one nested metadata object across folds."""
+
+    metadata_columns = ("fold_trace",)
+
+    def __init__(self):
+        self._metadata = {"fold_trace": {"fold": None, "history": []}}
+
+    def split(self, y, metadata):
+        del y
+        positions = np.arange(len(metadata))
+        midpoint = max(1, len(positions) // 2)
+        folds = (
+            (positions[midpoint:], positions[:midpoint]),
+            (positions[:midpoint], positions[midpoint:]),
+        )
+        for fold, (train, test) in enumerate(folds):
+            self._metadata["fold_trace"]["fold"] = fold
+            self._metadata["fold_trace"]["history"].append(fold)
+            yield train, test
+
+    def get_n_splits(self, *args, **kwargs):
+        return 2
+
+    def get_metadata(self):
+        return self._metadata
+
+
+class MalformedTopLevelSplitter(BaseCrossValidator):
+    """Top-level splitter used to exercise fold-index validation."""
+
+    def __init__(self, failure):
+        self.failure = failure
+
+    def split(self, y, metadata):
+        del y
+        positions = np.arange(len(metadata))
+        test_mask = metadata["subject"].to_numpy() == 2
+        train = positions[~test_mask]
+        test = positions[test_mask]
+
+        if self.failure == "overlap":
+            train = np.concatenate([train, test[:1]])
+            yield train, test
+        elif self.failure == "duplicate":
+            yield np.concatenate([train, train[:1]]), test
+        elif self.failure == "float":
+            yield train.astype(float), test
+        elif self.failure == "out_of_range":
+            bad_test = test.copy()
+            bad_test[0] = len(metadata)
+            yield train, bad_test
+        elif self.failure == "four_way":
+            empty = train[:0]
+            yield train, empty, empty, test
+        else:
+            raise AssertionError(f"unknown failure mode {self.failure!r}")
+
+    def get_n_splits(self, *args, **kwargs):
+        return 1
 
 
 def _group_run(metadata):
@@ -297,6 +471,31 @@ class TestWithinSess:
         # We should have 9 columns in the results data frame
         assert len(results[0].keys()) == _expected_result_key_count()
 
+    def test_optuna_search_roc_auc_without_decision_function(self):
+        if not optuna_available:
+            pytest.skip("Optuna is not installed")
+        from optuna.distributions import CategoricalDistribution
+        from sklearn.metrics import get_scorer
+        from sklearn.naive_bayes import GaussianNB
+
+        from moabb.evaluations.utils import check_search_available
+
+        search_methods, _ = check_search_available()
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((40, 3))
+        y = np.tile([0, 1], 20)
+        search = search_methods["optuna"](
+            GaussianNB(),
+            {"var_smoothing": CategoricalDistribution([1e-9, 1e-8])},
+            n_trials=2,
+            cv=2,
+        )
+        search.fit(X, y)
+        # GaussianNB has predict_proba but no decision_function: the search must
+        # not advertise one, so ROC-AUC falls back to predict_proba.
+        assert not hasattr(search, "decision_function")
+        assert 0.0 <= get_scorer("roc_auc")(search, X, y) <= 1.0
+
     def test_eval_grid_search_optuna(self):
         if not optuna_available:
             pytest.skip("Optuna is not available")
@@ -305,7 +504,10 @@ class TestWithinSess:
         param_grid = {"C": {"csp__metric": ["euclid", "riemann"]}}
         process_pipeline = self.eval.paradigm.make_process_pipelines(dataset)[0]
 
+        # Cap the search budget: the tests check the Optuna path, not its
+        # convergence, and an uncapped search doubles the CI time.
         self.eval.optuna = True
+        self.eval.time_out = 1
 
         results = list(
             self.eval.evaluate(
@@ -317,29 +519,92 @@ class TestWithinSess:
         )
 
         self.eval.optuna = False
+        self.eval.time_out = 60 * 15
 
         # We should get 4 results, 2 sessions 2 subjects
         assert len(results) == 4
         # We should have 9 columns in the results data frame
         assert len(results[0].keys()) == _expected_result_key_count()
 
+    @pytest.mark.parametrize("optuna", [False, True])
+    @pytest.mark.parametrize(
+        "scorer",
+        [
+            ["accuracy", "balanced_accuracy"],
+            {"accuracy": "accuracy", "balanced_accuracy": "balanced_accuracy"},
+        ],
+        ids=["list", "dict"],
+    )
+    def test_eval_grid_search_multimetric_scorer(self, scorer, optuna, tmp_path):
+        if optuna and not optuna_available:
+            pytest.skip("Optuna is not available")
+        evaluation = ev.WithinSessionEvaluation(
+            paradigm=FakeImageryParadigm(scorer=scorer),
+            datasets=[dataset],
+            hdf5_path=str(tmp_path),
+            optuna=optuna,
+            # Optuna stops after the trial in flight; only used when optuna=True.
+            time_out=1 if optuna else 60 * 15,
+        )
+        param_grid = {"C": {"csp__metric": ["euclid", "riemann"]}}
+        process_pipeline = evaluation.paradigm.make_process_pipelines(dataset)[0]
+        results = list(
+            evaluation.evaluate(
+                dataset,
+                pipelines,
+                param_grid=param_grid,
+                process_pipeline=process_pipeline,
+            )
+        )
+        assert len(results) == 4
+        for res in results:
+            assert np.isfinite(res["score_accuracy"])
+            assert np.isfinite(res["score_balanced_accuracy"])
+
     def test_within_session_evaluation_save_model(self):
         res_test_path = "./res_test"
-
-        # Get a list of all subdirectories inside 'res_test'
-        subdirectories = [
-            d
-            for d in os.listdir(res_test_path)
-            if os.path.isdir(os.path.join(res_test_path, d))
-        ]
-
-        # Check if any of the subdirectories contain the partial name 'Model'
-        model_folder_exists = any("Model" in folder for folder in subdirectories)
-
-        # Assert that at least one folder with the partial name 'Model' exists
-        assert model_folder_exists, (
-            "No folder with partial name 'Model' found inside 'res_test' directory",
+        self.eval.suffix = "run_a"
+        process_pipeline = self.eval.paradigm.make_process_pipelines(dataset)[0]
+        list(
+            self.eval.evaluate(
+                dataset, pipelines, param_grid=None, process_pipeline=process_pipeline
+            )
         )
+
+        model_path = os.path.join(
+            res_test_path,
+            "Models_WithinSession",
+            type(self.eval.paradigm).__name__,
+            "run_a",
+        )
+        assert os.path.isdir(model_path), (
+            "Saved models should be namespaced under their paradigm and suffix.",
+        )
+        assert any(Path(model_path).rglob("fitted_model_*.pkl"))
+
+    @pytest.mark.parametrize("n_jobs_data", [1, 2])
+    def test_n_jobs_data_forwarded_to_get_data(self, n_jobs_data, tmp_path, monkeypatch):
+        evaluation = ev.WithinSessionEvaluation(
+            paradigm=FakeImageryParadigm(),
+            datasets=[dataset],
+            hdf5_path=str(tmp_path),
+            n_jobs_data=n_jobs_data,
+        )
+        seen = {}
+        orig_get_data = evaluation.paradigm.get_data
+
+        def spy(*args, **kwargs):
+            seen["n_jobs"] = kwargs.get("n_jobs", 1)
+            return orig_get_data(*args, **kwargs)
+
+        monkeypatch.setattr(evaluation.paradigm, "get_data", spy)
+        process_pipeline = evaluation.paradigm.make_process_pipelines(dataset)[0]
+        X, y, metadata = evaluation._load_data(
+            dataset, pipelines, process_pipeline, None, subjects=[1, 2]
+        )
+        assert seen["n_jobs"] == n_jobs_data
+        assert len(X) == len(y) == len(metadata)
+        assert set(metadata["subject"]) == {1, 2}
 
     def test_lambda_warning(self):
         def explicit_kernel(x):
@@ -634,6 +899,237 @@ def test_custom_cv_receives_compatible_defaults_and_overrides(tmp_path):
     splitter = evaluation._create_splitter()
     assert splitter._cv_kwargs["n_splits"] == 3
     assert splitter.random_state == 17
+
+
+def test_cross_subject_accepts_top_level_splitter(tmp_path):
+    splitter = HeldOutSubjectSplitter(subject=2)
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        hdf5_path=tmp_path,
+        splitter=splitter,
+    )
+
+    assert evaluation._create_splitter() is splitter
+    assert "held_out_subject" in evaluation.additional_columns
+
+    _, y, metadata = FakeImageryParadigm().get_data(dataset)
+    folds = list(evaluation._create_splitter().split(y, metadata))
+
+    assert len(folds) == 1
+    train, test = folds[0]
+    assert set(metadata.loc[train, "subject"]) == {1}
+    assert set(metadata.loc[test, "subject"]) == {2}
+    assert splitter.get_metadata() == {"held_out_subject": 2}
+
+
+@pytest.mark.parametrize(
+    "protocol_kwargs",
+    [
+        {"cv_class": GroupKFold},
+        {"cv_kwargs": {"random_state": 17}},
+        {"n_splits": 2},
+        {"groups": "session"},
+        {"cs_mode": ev.CrossSubjectMode.TRAIN_TRIALWISE},
+    ],
+)
+def test_cross_subject_top_level_splitter_rejects_protocol_conflicts(
+    tmp_path, protocol_kwargs
+):
+    with pytest.raises(ValueError, match="splitter cannot be combined"):
+        ev.CrossSubjectEvaluation(
+            paradigm=FakeImageryParadigm(),
+            datasets=[dataset],
+            hdf5_path=tmp_path,
+            splitter=HeldOutSubjectSplitter(subject=2),
+            **protocol_kwargs,
+        )
+
+
+def test_cross_subject_top_level_splitter_rejects_multi_subject_test_fold(tmp_path):
+    ds = FakeDataset(["left_hand", "right_hand"], n_subjects=3, n_sessions=2, seed=18)
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[ds],
+        hdf5_path=tmp_path,
+        overwrite=True,
+        n_jobs=1,
+        splitter=MultiSubjectTestSplitter(),
+    )
+    pipe = make_pipeline(Covariances("oas"), CSP(8), LDA())
+
+    with pytest.raises(ValueError, match="exactly one subject"):
+        evaluation.process(OrderedDict([("P", pipe)]))
+
+
+@pytest.mark.parametrize(
+    "failure, message",
+    [
+        ("overlap", "disjoint"),
+        ("duplicate", "duplicate train"),
+        ("float", "integer positional indices"),
+        ("out_of_range", "out-of-range test"),
+        ("four_way", "either \\(train, test\\) or \\(train, calibration, test\\)"),
+    ],
+)
+def test_cross_subject_top_level_splitter_rejects_invalid_fold_indices(
+    tmp_path, failure, message
+):
+    splitter = MalformedTopLevelSplitter(failure)
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        hdf5_path=tmp_path,
+        splitter=splitter,
+    )
+    _, y, metadata = FakeImageryParadigm().get_data(dataset)
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        evaluation._preview_splits(splitter, y, metadata)
+
+
+def test_cross_subject_top_level_splitter_metadata_is_snapshotted(tmp_path):
+    splitter = ReusedNestedMetadataSplitter()
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        hdf5_path=tmp_path,
+        splitter=splitter,
+    )
+    _, y, metadata = FakeImageryParadigm().get_data(dataset)
+
+    preview = evaluation._preview_splits(splitter, y, metadata)
+
+    assert preview[0][4]["fold_trace"] == {"fold": 0, "history": [0]}
+    assert preview[1][4]["fold_trace"] == {"fold": 1, "history": [0, 1]}
+    assert preview[0][4]["fold_trace"] is not preview[1][4]["fold_trace"]
+
+
+def test_cross_subject_top_level_splitter_indices_are_positional(tmp_path):
+    splitter = HeldOutSubjectSplitter(subject=2)
+    _, y, metadata = FakeImageryParadigm().get_data(dataset)
+    metadata = metadata.copy()
+    metadata.index = np.arange(100, 100 + len(metadata))
+
+    train, test = next(splitter.split(y, metadata))
+
+    assert np.array_equal(test, np.flatnonzero(metadata["subject"].to_numpy() == 2))
+    assert set(metadata.iloc[test]["subject"]) == {2}
+    assert not np.intersect1d(train, test).size
+
+
+def test_cross_subject_top_level_splitter_type_is_validated(tmp_path):
+    with pytest.raises(TypeError, match="BaseCrossValidator"):
+        ev.CrossSubjectEvaluation(
+            paradigm=FakeImageryParadigm(),
+            datasets=[dataset],
+            hdf5_path=tmp_path,
+            splitter=object(),
+        )
+
+
+def test_cross_subject_top_level_splitter_runs_end_to_end(tmp_path):
+    ds = FakeDataset(["left_hand", "right_hand"], n_subjects=3, n_sessions=2, seed=18)
+    splitter = HeldOutSubjectSplitter(subject=3)
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[ds],
+        hdf5_path=tmp_path,
+        overwrite=True,
+        n_jobs=1,
+        splitter=splitter,
+    )
+    pipe = make_pipeline(Covariances("oas"), CSP(8), LDA())
+
+    results = evaluation.process(OrderedDict([("P", pipe)]))
+
+    # Result tables serialize dataset metadata values as strings.
+    assert set(results["subject"]) == {"3"}
+    assert set(results["held_out_subject"]) == {3}
+
+
+def test_cross_subject_top_level_three_way_splitter_routes_calibration(tmp_path):
+    from sklearn import config_context
+
+    _TRANSFER_CAPTURE.clear()
+    with config_context(enable_metadata_routing=True):
+        step = _TransferRecorder().set_fit_request(subjects=True, X_target_unlabeled=True)
+    pipe = make_pipeline(Covariances("oas"), step, CSP(8), LDA())
+    ds = FakeDataset(["left_hand", "right_hand"], n_subjects=3, n_sessions=2, seed=19)
+    splitter = ThreeWayHeldOutSubjectSplitter(subject=3)
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[ds],
+        hdf5_path=tmp_path,
+        overwrite=True,
+        n_jobs=1,
+        splitter=splitter,
+    )
+
+    results = evaluation.process(OrderedDict([("T", pipe)]))
+
+    assert len(results) > 0
+    assert set(results["subject"]) == {"3"}
+    assert _TRANSFER_CAPTURE, "transfer step was never fitted"
+    assert all(capture["n_subjects"] > 0 for capture in _TRANSFER_CAPTURE)
+    assert all(capture["n_target"] > 0 for capture in _TRANSFER_CAPTURE)
+
+
+def test_cross_subject_metadata_aware_cv_class_is_used_directly(tmp_path):
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        hdf5_path=tmp_path,
+        cv_class=TargetSubjectSessionSplitter,
+        cv_kwargs={"target": 2, "test_session": "1"},
+    )
+
+    splitter = evaluation._create_splitter()
+    assert isinstance(splitter, TargetSubjectSessionSplitter)
+    assert "target_subject" in evaluation.additional_columns
+
+
+def test_cross_subject_metadata_aware_cv_class_excludes_rows_end_to_end(tmp_path):
+    ds = FakeDataset(["left_hand", "right_hand"], n_subjects=3, n_sessions=2, seed=18)
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[ds],
+        hdf5_path=tmp_path,
+        overwrite=True,
+        n_jobs=1,
+        cv_class=TargetSubjectSessionSplitter,
+        cv_kwargs={"target": 2, "test_session": "1"},
+    )
+    _, y, metadata = FakeImageryParadigm().get_data(ds)
+    ((_, train, _, test, _),) = evaluation._preview_splits(
+        evaluation._create_splitter(), y, metadata
+    )
+    assert set(metadata.iloc[train]["subject"]) == {1, 3}
+    assert set(metadata.iloc[test]["subject"]) == {2}
+    assert set(metadata.iloc[test]["session"]) == {"1"}
+    excluded = np.setdiff1d(np.arange(len(metadata)), np.concatenate([train, test]))
+    assert excluded.size
+    assert set(metadata.iloc[excluded]["subject"]) == {2}
+    assert set(metadata.iloc[excluded]["session"]) == {"0"}
+
+    pipe = make_pipeline(Covariances("oas"), CSP(8), LDA())
+    results = evaluation.process(OrderedDict([("P", pipe)]))
+
+    assert set(results["subject"]) == {"2"}
+    assert set(results["session"]) == {"1"}
+    assert set(results["target_subject"]) == {2}
+
+
+def test_cross_subject_metadata_aware_cv_class_rejects_protocol_conflicts(tmp_path):
+    with pytest.raises(ValueError, match="splitter cannot be combined"):
+        ev.CrossSubjectEvaluation(
+            paradigm=FakeImageryParadigm(),
+            datasets=[dataset],
+            hdf5_path=tmp_path,
+            cv_class=TargetSubjectSessionSplitter,
+            cv_kwargs={"target": 2, "test_session": "1"},
+            n_splits=2,
+        )
 
 
 @pytest.fixture(scope="module")
@@ -1106,6 +1602,15 @@ class Test_CrossSess(TestWithinSess):
 
 
 class TestUtilEvaluation:
+    def test_get_nchan(self):
+        from moabb.evaluations.utils import _get_nchan
+
+        assert _get_nchan(np.zeros((4, 3, 10))) == 3
+        # Trials of different lengths, as given for recordings of different rates.
+        trials = np.empty(2, dtype=object)
+        trials[0], trials[1] = np.zeros((3, 10)), np.zeros((3, 20))
+        assert _get_nchan(trials) == 3
+
     def test_save_model_cv(self):
         model = Dummy()
         save_path = "test_save_path"
@@ -1141,6 +1646,76 @@ class TestUtilEvaluation:
         )
         assert grid_save_path == expected_grid_path
 
+    def test_create_save_path_is_namespaced_by_paradigm_and_suffix(self):
+        save_path = create_save_path(
+            "base_path",
+            "evaluation_code",
+            1,
+            "0",
+            "evaluation_name",
+            eval_type="WithinSession",
+            paradigm="MotorImagery",
+            suffix="run_a",
+        )
+
+        expected_path = os.path.join(
+            "base_path",
+            "Models_WithinSession",
+            "MotorImagery",
+            "run_a",
+            "evaluation_code",
+            "1",
+            "0",
+            "evaluation_name",
+        )
+        assert save_path == expected_path
+
+        other_run_path = create_save_path(
+            "base_path",
+            "evaluation_code",
+            1,
+            "0",
+            "evaluation_name",
+            eval_type="WithinSession",
+            paradigm="SSVEP",
+            suffix="run_a",
+        )
+        assert other_run_path != save_path
+
+        other_suffix_path = create_save_path(
+            "base_path",
+            "evaluation_code",
+            1,
+            "0",
+            "evaluation_name",
+            eval_type="WithinSession",
+            paradigm="MotorImagery",
+            suffix="run_b",
+        )
+        assert other_suffix_path != save_path
+
+        grid_save_path = create_save_path(
+            "base_path",
+            "evaluation_code",
+            1,
+            "0",
+            "evaluation_name",
+            grid=True,
+            eval_type="WithinSession",
+            paradigm="MotorImagery",
+            suffix="run_a",
+        )
+        assert grid_save_path == os.path.join(
+            "base_path",
+            "GridSearch_WithinSession",
+            "MotorImagery",
+            "run_a",
+            "evaluation_code",
+            "1",
+            "0",
+            "evaluation_name",
+        )
+
     def test_save_model_cv_with_pytorch_model(self):
         try:
             import torch
@@ -1160,6 +1735,48 @@ class TestUtilEvaluation:
         assert os.path.isfile(os.path.join(save_path, "step_fitted_0_optim.pkl"))
         assert os.path.isfile(os.path.join(save_path, "step_fitted_0_history.json"))
         assert os.path.isfile(os.path.join(save_path, "step_fitted_0_criterion.pkl"))
+
+    def test_save_model_cv_search_over_pytorch_pipeline(self, tmp_path):
+        torch = pytest.importorskip("torch")
+        skorch = pytest.importorskip("skorch")
+
+        net = skorch.NeuralNetClassifier(
+            module=torch.nn.Linear(10, 2),
+            criterion=torch.nn.CrossEntropyLoss,
+            max_epochs=1,
+            train_split=None,
+            verbose=0,
+        )
+        search = GridSearchCV(
+            Pipeline([("scale", FunctionTransformer()), ("step", net)]),
+            {"step__lr": [0.01, 0.1]},
+            cv=2,
+        )
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((40, 10)).astype(np.float32)
+        y = np.tile([0, 1], 20).astype(np.int64)
+        search.fit(X, y)
+
+        save_model_cv(search, tmp_path, 0)
+
+        # The best pipeline is saved like an unwrapped torch pipeline ...
+        assert (tmp_path / "step_fitted_0_model.pkl").is_file()
+        assert (tmp_path / "scale_fitted_0.pkl").is_file()
+        assert not (tmp_path / "fitted_model_0.pkl").exists()
+        # ... and the selected hyper-parameters are recorded.
+        with open(tmp_path / "best_params_0.json") as file:
+            assert json.load(file) == {"step__lr": search.best_params_["step__lr"]}
+
+    def test_save_model_cv_search_over_sklearn_pipeline_unchanged(self, tmp_path):
+        search = GridSearchCV(LDA(), {"solver": ["svd", "lsqr"]}, cv=2)
+        rng = np.random.default_rng(0)
+        search.fit(rng.standard_normal((40, 4)), np.tile([0, 1], 20))
+
+        save_model_cv(search, tmp_path, 0)
+
+        with open(tmp_path / "fitted_model_0.pkl", "rb") as file:
+            assert isinstance(pickle.load(file), GridSearchCV)
+        assert not (tmp_path / "best_params_0.json").exists()
 
     def test_create_save_path_with_cross_session_evaluation(self):
         hdf5_path = "base_path"
@@ -1396,6 +2013,174 @@ class TestParallelProcess:
         # 2 subjects × 2 sessions = 4 results
         assert len(results) == 4
 
+    def test_process_keeps_rows_of_each_dataset_once(self, tmp_path):
+        """Datasets sharing a pipeline digest do not duplicate their results."""
+        # Same parameters except the channels: same process pipeline digest.
+        datasets = [
+            FakeDataset(
+                ["left_hand", "right_hand"], channels=channels, n_subjects=2, seed=3
+            )
+            for channels in (("C3", "Cz", "C4"), ("C3", "Cz", "C4", "Pz"))
+        ]
+        evaluation = ev.CrossSubjectEvaluation(
+            paradigm=FakeImageryParadigm(),
+            datasets=datasets,
+            overwrite=True,
+            hdf5_path=str(tmp_path / "parallel_test"),
+        )
+        results = evaluation.process(
+            {"C": make_pipeline(Covariances("oas"), CSP(2), LDA())}
+        )
+        # 2 datasets x 2 subjects x 2 sessions = 8 results, each once
+        keys = ["dataset", "subject", "session", "pipeline"]
+        assert len(results) == 8
+        assert not results.duplicated(keys).any()
+
+    def test_cross_subject_multisubject_fold_preserves_provenance(self, tmp_path):
+        """A fold holding out multiple subjects is scored per subject/session."""
+        ds = FakeDataset(["left_hand", "right_hand"], n_subjects=4, n_sessions=2, seed=23)
+        paradigm = FakeImageryParadigm()
+        evaluation = ev.CrossSubjectEvaluation(
+            paradigm=paradigm,
+            datasets=[ds],
+            n_splits=2,
+            overwrite=True,
+            hdf5_path=str(tmp_path / "cross_subject_multisubject"),
+            save_model=True,
+        )
+
+        results = evaluation.process(pipelines)
+
+        assert len(results) == 8
+        assert set(results["subject"]) == {str(subject) for subject in ds.subject_list}
+        assert (results.groupby(["subject", "session"], observed=True).size() == 1).all()
+
+        _, _, metadata = paradigm.get_data(ds)
+        metadata = metadata.copy()
+        metadata["subject"] = metadata["subject"].astype(str)
+        expected_sizes = metadata.groupby(["subject", "session"], observed=True).size()
+        actual_sizes = results.set_index(["subject", "session"])["samples_test"]
+        actual_sizes = actual_sizes.reindex(expected_sizes.index)
+        np.testing.assert_array_equal(actual_sizes.to_numpy(), expected_sizes.to_numpy())
+
+        for subject in ds.subject_list:
+            model_dir = (
+                tmp_path
+                / "cross_subject_multisubject"
+                / "Models_CrossSubject"
+                / type(paradigm).__name__
+                / ds.code
+                / str(subject)
+                / "C"
+            )
+            assert list(model_dir.glob("fitted_model_*.pkl"))
+
+    def test_cross_subject_multisubject_fold_respects_partial_work_plan(self, tmp_path):
+        """A cached first subject must not suppress work for another held-out subject."""
+        ds = FakeDataset(["left_hand", "right_hand"], n_subjects=4, n_sessions=2, seed=42)
+        evaluation = ev.CrossSubjectEvaluation(
+            paradigm=FakeImageryParadigm(),
+            datasets=[ds],
+            hdf5_path=str(tmp_path / "cross_subject_partial_cache"),
+            n_splits=2,
+        )
+        metadata = pd.DataFrame(
+            {"subject": np.repeat([1, 2, 3, 4], 2), "session": ["0", "1"] * 4}
+        )
+        y = np.array([0, 1] * 4)
+        splitter = evaluation._create_splitter()
+        folds = list(splitter.split(y, metadata))
+        held_out = list(pd.unique(metadata.iloc[folds[0][1]]["subject"]))
+        assert len(held_out) == 2
+
+        target_subject = held_out[1]
+        pipeline = Dummy(strategy="most_frequent")
+        work_plan = {target_subject: {"dummy": pipeline}}
+        tasks = evaluation._build_task_list(
+            ds,
+            None,
+            y,
+            metadata,
+            evaluation._create_splitter(),
+            work_plan,
+            {"dummy": pipeline},
+            None,
+        )
+
+        assert len(tasks) == 1
+        assert tasks[0]["subject"] == target_subject
+        assert tasks[0]["score_subjects"] == [target_subject]
+        assert target_subject in set(metadata.iloc[tasks[0]["test_idx"]]["subject"])
+
+    def test_cross_subject_partial_cache_fits_remaining_fold_once(self, tmp_path):
+        """A partially cached grouped fold is fitted once for the missing subject."""
+
+        class CountingDummy(Dummy):
+            fit_calls = 0
+
+            def fit(self, X, y, sample_weight=None):
+                type(self).fit_calls += 1
+                return super().fit(X, y, sample_weight=sample_weight)
+
+        ds = FakeDataset(["left_hand", "right_hand"], n_subjects=4, n_sessions=2, seed=42)
+        paradigm = FakeImageryParadigm()
+        evaluation = ev.CrossSubjectEvaluation(
+            paradigm=paradigm,
+            datasets=[ds],
+            hdf5_path=str(tmp_path / "cross_subject_cached_fold"),
+            n_splits=2,
+        )
+        pipeline = CountingDummy(strategy="most_frequent")
+        pipeline_dict = {"counting": pipeline}
+
+        X, y, metadata = paradigm.get_data(ds)
+        folds = list(evaluation._create_splitter().split(y, metadata))
+        held_out_by_fold = [
+            list(pd.unique(metadata.iloc[test_idx]["subject"])) for _, test_idx in folds
+        ]
+        assert all(len(subjects) == 2 for subjects in held_out_by_fold)
+
+        cached_target = held_out_by_fold[0][0]
+        missing_target = held_out_by_fold[0][1]
+        cached_subjects = [cached_target, *held_out_by_fold[1]]
+
+        process_pipeline = paradigm.make_process_pipelines(ds)[0]
+        for cached_subject in cached_subjects:
+            cached_result = {
+                "score": 0.0,
+                "time": 0.0,
+                "dataset": ds,
+                "subject": cached_subject,
+                "session": "cached",
+                "n_samples": 1,
+                "n_channels": X.shape[1],
+                "carbon_emission": 0.0,
+            }
+            evaluation.results.add(
+                {"counting": cached_result},
+                pipelines=pipeline_dict,
+                process_pipeline=process_pipeline,
+            )
+
+        before = evaluation.results.to_dataframe(
+            pipelines=pipeline_dict, process_pipeline=process_pipeline
+        )
+        before_counts = before.groupby("subject", observed=True).size().to_dict()
+
+        CountingDummy.fit_calls = 0
+        after = evaluation.process(pipeline_dict)
+
+        assert CountingDummy.fit_calls == 1
+        after_counts = after.groupby("subject", observed=True).size().to_dict()
+        increased_subjects = {
+            subject
+            for subject, count in after_counts.items()
+            if count > before_counts.get(subject, 0)
+        }
+        assert increased_subjects == {str(missing_target)}
+        assert after_counts[str(cached_target)] == before_counts[str(cached_target)]
+        assert after_counts[str(missing_target)] == ds.n_sessions
+
     def test_learning_curve_parallel(self, tmp_path):
         """LearningCurve evaluation via parallel process()."""
         evaluation = ev.WithinSessionEvaluation(
@@ -1562,6 +2347,41 @@ class TestParallelLegacyEquivalence:
         """CrossSession parallel matches legacy scores."""
         self._compare_parallel_vs_legacy(ev.CrossSessionEvaluation, tmp_path)
 
+    def test_cross_session_multisession_fold_equivalence(self, tmp_path):
+        """Custom folds spanning sessions keep per-session result provenance."""
+        paradigm = FakeImageryParadigm()
+        ds = FakeDataset(["left_hand", "right_hand"], n_subjects=2, n_sessions=4, seed=12)
+        kwargs = {"cv_class": GroupKFold, "cv_kwargs": {"n_splits": 2}, "overwrite": True}
+
+        eval_parallel = ev.CrossSessionEvaluation(
+            paradigm=paradigm,
+            datasets=[ds],
+            hdf5_path=str(tmp_path / "parallel_multisession"),
+            **kwargs,
+        )
+        results_parallel = eval_parallel.process(pipelines)
+
+        eval_legacy = ev.CrossSessionEvaluation(
+            paradigm=paradigm,
+            datasets=[ds],
+            hdf5_path=str(tmp_path / "legacy_multisession"),
+            **kwargs,
+        )
+        results_legacy = eval_legacy._process_legacy(
+            pipelines, param_grid=None, postprocess_pipeline=None
+        )
+
+        keys = ["subject", "session", "pipeline"]
+        left = results_parallel[keys + ["score"]].sort_values(keys).reset_index(drop=True)
+        right = results_legacy[keys + ["score"]].sort_values(keys).reset_index(drop=True)
+
+        assert len(left) == len(right) == 8
+        assert left[keys].equals(right[keys])
+        assert set(left["session"]) == {"0", "1", "2", "3"}
+        np.testing.assert_allclose(
+            left["score"].to_numpy(), right["score"].to_numpy(), rtol=1e-10, atol=1e-10
+        )
+
     def test_cross_subject_equivalence(self, tmp_path):
         """CrossSubject parallel matches legacy scores."""
         self._compare_parallel_vs_legacy(ev.CrossSubjectEvaluation, tmp_path)
@@ -1656,6 +2476,28 @@ class TestAggregateFoldResults:
         np.testing.assert_almost_equal(res["score_accuracy"], 0.4)
         # score_f1: avg(0.7, 0.0) = 0.35
         np.testing.assert_almost_equal(res["score_f1"], 0.35)
+
+    def test_error_only_batch_gets_score_columns_seen_elsewhere(self):
+        """A batch of error folds still fills the score_* columns of the dataset.
+
+        Results are saved per (pipeline, subject) batch (gh-419), so an
+        error-only subject is aggregated alone; ``score_cols`` brings in the
+        columns the other subjects produced, as one big aggregation would.
+        """
+        from moabb.evaluations.base import BaseEvaluation
+
+        folds = [
+            self._make_fold(2, "0", "csp", 0.0, is_error=True),
+            self._make_fold(2, "0", "csp", 0.0, is_error=True),
+        ]
+        agg = BaseEvaluation._aggregate_fold_results(
+            folds, score_cols=["score_accuracy", "score_f1"]
+        )
+        assert len(agg) == 1
+        np.testing.assert_almost_equal(agg[0]["score_accuracy"], 0.0)
+        np.testing.assert_almost_equal(agg[0]["score_f1"], 0.0)
+        # Without score_cols the behaviour is unchanged.
+        assert "score_f1" not in BaseEvaluation._aggregate_fold_results(folds)[0]
 
     def test_non_numeric_score_fold_does_not_abort(self):
         """A fold with a non-numeric score becomes NaN, not a fatal TypeError."""
@@ -1933,3 +2775,536 @@ def test_cs_mode_trialwise_runs_end_to_end():
         scores[CrossSubjectMode.TRAIN_TRIALWISE]["score"].to_numpy(),
         scores[CrossSubjectMode.TRAIN]["score"].to_numpy(),
     )
+
+
+@pytest.mark.parametrize(
+    "name", ["SSVEP_CCA", "SSVEP_TRCA", "SSVEP_MsetCCA", "SSVEP_itCCA", "SSVEP_eCCA"]
+)
+def test_pipeline_requires_epochs_for_epochs_classifiers(name):
+    clf = getattr(classification, name)()
+    assert _pipeline_requires_epochs(clf)
+    assert _pipeline_requires_epochs(make_pipeline(clf))
+
+
+def test_pipeline_requires_epochs_false_for_array_pipeline():
+    assert not _pipeline_requires_epochs(make_pipeline(Covariances("oas"), CSP(8), LDA()))
+    assert not _pipeline_requires_epochs(Dummy())
+
+
+@pytest.mark.parametrize(
+    "clf",
+    [
+        classification.SSVEP_itCCA(),
+        # The fake epochs name their events "1", "2", "3", so the frequencies
+        # of the encoded labels have to be given explicitly.
+        classification.SSVEP_eCCA(freq_map={0: 13.0, 1: 17.0, 2: 21.0}),
+    ],
+    ids=["itCCA", "eCCA"],
+)
+def test_within_session_passes_epochs(clf, tmp_path):
+    ds = FakeDataset(
+        event_list=("13", "17", "21"),
+        n_sessions=1,
+        n_runs=1,
+        n_subjects=1,
+        paradigm="ssvep",
+        sfreq=256,
+        seed=12,
+    )
+    evaluation = ev.WithinSessionEvaluation(
+        paradigm=SSVEP(n_classes=3),
+        datasets=[ds],
+        overwrite=True,
+        n_splits=2,
+        hdf5_path=tmp_path,
+    )
+    results = evaluation.process({"clf": clf})
+    assert len(results) == 1
+
+
+# Fit counter shared by every clone of ``_CrashOnFitLDA``. The crash switch is
+# kept outside the estimator parameters so a crashing run and a clean rerun
+# share the same pipeline digest and therefore the same HDF5 entries.
+_CRASH_STATE = {"n_fits": 0, "crash_at": None}
+
+
+class _CrashOnFitLDA(sklearn.base.ClassifierMixin, sklearn.base.BaseEstimator):
+    """LDA on log-variance features that can be told to crash on a given fit."""
+
+    def fit(self, X, y):
+        _CRASH_STATE["n_fits"] += 1
+        if _CRASH_STATE["n_fits"] == _CRASH_STATE["crash_at"]:
+            raise RuntimeError("simulated pipeline crash")
+        self.lda_ = LDA().fit(self._features(X), y)
+        self.classes_ = self.lda_.classes_
+        return self
+
+    @staticmethod
+    def _features(X):
+        return np.log(np.var(np.asarray(X), axis=-1))
+
+    def predict(self, X):
+        return self.lda_.predict(self._features(X))
+
+    def predict_proba(self, X):
+        return self.lda_.predict_proba(self._features(X))
+
+    def decision_function(self, X):
+        return self.lda_.decision_function(self._features(X))
+
+
+def _run_crash_evaluation(evaluation_class, ds, hdf5_path, overwrite, crash_at=None):
+    _CRASH_STATE.update(n_fits=0, crash_at=crash_at)
+    evaluation = evaluation_class(
+        paradigm=FakeImageryParadigm(),
+        datasets=[ds],
+        overwrite=overwrite,
+        n_jobs=1,
+        random_state=42,
+        hdf5_path=str(hdf5_path),
+    )
+    pipes = {"crashy": make_pipeline(_CrashOnFitLDA())}
+    return evaluation, pipes
+
+
+@pytest.mark.parametrize(
+    "evaluation_class",
+    [
+        ev.WithinSessionEvaluation,
+        ev.WithinSubjectEvaluation,
+        ev.CrossSessionEvaluation,
+        ev.CrossSubjectEvaluation,
+    ],
+)
+def test_results_persisted_before_crash_and_resumed(evaluation_class, tmp_path):
+    """Finished subjects are saved before a later subject crashes (gh-419/775).
+
+    The pipeline crashes on the very last fit, which belongs to the last
+    subject evaluated. Every other subject must already be in the HDF5 file,
+    with the same rows, in the same order, as an uninterrupted run; the
+    crashing subject must not be there at all (no partial rows), and a rerun
+    with ``overwrite=False`` must only fit the missing subject.
+    """
+    ds = FakeDataset(["left_hand", "right_hand"], n_subjects=3, n_sessions=2, seed=7)
+    subjects = [str(s) for s in ds.subject_list]
+
+    # Reference: uninterrupted run, also tells how many fits a full run needs.
+    ref_eval, pipes = _run_crash_evaluation(
+        evaluation_class, ds, tmp_path / "ref", overwrite=True
+    )
+    reference = ref_eval.process(pipes)
+    n_fits_total = _CRASH_STATE["n_fits"]
+    assert n_fits_total % len(subjects) == 0
+    n_fits_per_subject = n_fits_total // len(subjects)
+
+    # Crashing run: dies on the last fit, i.e. inside the last subject.
+    crash_eval, pipes = _run_crash_evaluation(
+        evaluation_class, ds, tmp_path / "run", overwrite=True, crash_at=n_fits_total
+    )
+    with pytest.raises(RuntimeError, match="simulated pipeline crash"):
+        crash_eval.process(pipes)
+
+    saved = crash_eval.results.to_dataframe()
+    assert not saved.empty, "finished subjects were lost when the run crashed"
+    finished = list(saved["subject"].unique())
+    assert len(finished) == len(subjects) - 1
+    (crashed,) = set(subjects) - set(finished)
+
+    cols = ["subject", "session", "score", "samples", "samples_test", "n_classes"]
+    pd.testing.assert_frame_equal(
+        saved[cols].reset_index(drop=True),
+        reference.loc[reference["subject"] != crashed, cols].reset_index(drop=True),
+    )
+
+    # Rerun without overwrite: only the missing subject is computed.
+    resume_eval, pipes = _run_crash_evaluation(
+        evaluation_class, ds, tmp_path / "run", overwrite=False
+    )
+    resumed = resume_eval.process(pipes)
+    assert _CRASH_STATE["n_fits"] == n_fits_per_subject
+
+    # WithinSubjectSplitter shares one RNG across the subjects it is given, so
+    # a subject evaluated alone gets other folds than in a full run (this
+    # predates gh-419). Its scores are only compared for the finished subjects.
+    if evaluation_class is ev.WithinSubjectEvaluation:
+        cols.remove("score")
+    pd.testing.assert_frame_equal(
+        resumed[cols].sort_values(["subject", "session"]).reset_index(drop=True),
+        reference[cols].sort_values(["subject", "session"]).reset_index(drop=True),
+    )
+    assert not resumed.duplicated(["subject", "session"]).any()
+
+
+def test_results_pushed_per_subject_batch(tmp_path, monkeypatch):
+    """process() writes one (pipeline, subject) batch at a time (gh-419)."""
+    ds = FakeDataset(["left_hand", "right_hand"], n_subjects=3, n_sessions=2, seed=7)
+    evaluation, _ = _run_crash_evaluation(
+        ev.WithinSessionEvaluation, ds, tmp_path, overwrite=True
+    )
+    pipes = {
+        "a": make_pipeline(_CrashOnFitLDA()),
+        "b": make_pipeline(FunctionTransformer(_identity), _CrashOnFitLDA()),
+    }
+    pushed = []
+    original_add = evaluation.results.add
+
+    def spy_add(results, pipelines, process_pipeline):
+        pushed.append(
+            sorted(
+                {
+                    (name, str(r["subject"]))
+                    for name, rows in results.items()
+                    for r in rows
+                }
+            )
+        )
+        return original_add(results, pipelines, process_pipeline)
+
+    monkeypatch.setattr(evaluation.results, "add", spy_add)
+    results = evaluation.process(pipes)
+
+    # 3 subjects x 2 pipelines, each saved on its own, each exactly once.
+    assert all(len(batch) == 1 for batch in pushed)
+    assert sorted(b[0] for b in pushed) == sorted(
+        (name, str(s)) for name in pipes for s in ds.subject_list
+    )
+    assert len(results) == 3 * 2 * 2  # subjects x sessions x pipelines
+
+
+def test_streamed_results_match_without_return_as(tmp_path, monkeypatch):
+    """joblib < 1.3 (no ``return_as``) falls back to a list, same results."""
+    import moabb.evaluations.base as base_module
+
+    ds = FakeDataset(["left_hand", "right_hand"], n_subjects=2, n_sessions=2, seed=7)
+    ref_eval, pipes = _run_crash_evaluation(
+        ev.WithinSessionEvaluation, ds, tmp_path / "ref", overwrite=True
+    )
+    reference = ref_eval.process(pipes)
+
+    class OldParallel(base_module.Parallel):
+        def __init__(self, *args, **kwargs):
+            if "return_as" in kwargs:
+                raise TypeError("unexpected keyword argument 'return_as'")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(base_module, "Parallel", OldParallel)
+    old_eval, pipes = _run_crash_evaluation(
+        ev.WithinSessionEvaluation, ds, tmp_path / "old", overwrite=True
+    )
+    fallback = old_eval.process(pipes)
+
+    cols = ["subject", "session", "score", "samples", "samples_test", "n_classes"]
+    pd.testing.assert_frame_equal(fallback[cols], reference[cols])
+
+
+def test_streamed_results_same_with_two_jobs(tmp_path):
+    """Streaming from worker processes gives the same rows as n_jobs=1."""
+    ds = FakeDataset(["left_hand", "right_hand"], n_subjects=2, n_sessions=2, seed=7)
+    ref_eval, pipes = _run_crash_evaluation(
+        ev.WithinSessionEvaluation, ds, tmp_path / "one", overwrite=True
+    )
+    reference = ref_eval.process(pipes)
+    par_eval, pipes = _run_crash_evaluation(
+        ev.WithinSessionEvaluation, ds, tmp_path / "two", overwrite=True
+    )
+    par_eval.n_jobs = 2
+    parallel = par_eval.process(pipes)
+
+    cols = ["subject", "session", "score", "samples", "samples_test", "n_classes"]
+    pd.testing.assert_frame_equal(parallel[cols], reference[cols])
+
+
+class SubjectSessionMetadataSplitter(TargetSubjectSessionSplitter):
+    """The splitter from issue #1104: metadata_columns names reserved columns."""
+
+    metadata_columns = ("subject", "session")
+
+    def get_metadata(self):
+        return {"subject": self.target, "session": self.test_session}
+
+
+def test_cross_subject_cv_class_with_reserved_metadata_columns_saves(tmp_path):
+    ds = FakeDataset(["left_hand", "right_hand"], n_subjects=3, n_sessions=2, seed=18)
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[ds],
+        hdf5_path=tmp_path,
+        overwrite=True,
+        n_jobs=1,
+        cv_class=SubjectSessionMetadataSplitter,
+        cv_kwargs={"target": 2, "test_session": "1"},
+    )
+    # subject/session are already result columns; they must not be added twice
+    assert "subject" not in evaluation.additional_columns
+    assert "session" not in evaluation.additional_columns
+
+    pipe = make_pipeline(Covariances("oas"), CSP(8), LDA())
+    results = evaluation.process(OrderedDict([("P", pipe)]))
+
+    assert set(results["subject"]) == {"2"}
+    assert set(results["session"]) == {"1"}
+
+
+# ---------------------------------------------------------------------------
+# Metadata columns routed as fit metadata by _evaluate_fold.
+# ---------------------------------------------------------------------------
+
+_EXTRA_CAPTURE = []
+
+
+class _ExtraRecorder(sklearn.base.TransformerMixin, sklearn.base.BaseEstimator):
+    """Records the ``device`` metadata it is routed."""
+
+    def fit(self, X, y=None, device=None):
+        _EXTRA_CAPTURE.append(device)
+        return self
+
+    def transform(self, X):
+        return X
+
+
+@pytest.mark.parametrize("requested", [True, False])
+def test_evaluate_fold_routes_requested_metadata_columns(requested):
+    """A metadata column reaches only the steps requesting it, without a
+    transfer split, and is ignored by the other pipelines."""
+    from sklearn import config_context
+
+    from moabb.evaluations.base import _evaluate_fold
+
+    _EXTRA_CAPTURE.clear()
+    with config_context(enable_metadata_routing=True):
+        step = _ExtraRecorder().set_fit_request(device=requested)
+    pipe = make_pipeline(step, Covariances("oas"), CSP(2), LDA())
+
+    evaluation = ev.CrossSessionEvaluation(
+        paradigm=FakeImageryParadigm(), datasets=[dataset], overwrite=True
+    )
+    X, y, metadata = FakeImageryParadigm().get_data(dataset, subjects=[1])
+    train = np.flatnonzero(metadata["session"] == metadata["session"].iloc[0])
+    test = np.flatnonzero(metadata["session"] != metadata["session"].iloc[0])
+    metadata["device"] = np.where(np.arange(len(y)) % 2, "Amp X", "Amp Y")
+
+    results = _evaluate_fold(
+        X,
+        y,
+        metadata,
+        evaluation._build_eval_config(None),
+        dataset,
+        "P",
+        pipe,
+        train,
+        test,
+        1,
+        metadata["session"].iloc[-1],
+        0,
+    )
+
+    assert len(results) == 1
+    (routed,) = _EXTRA_CAPTURE
+    if requested:
+        np.testing.assert_array_equal(routed, metadata["device"].to_numpy()[train])
+    else:
+        assert routed is None
+
+
+class _EveryBand(sklearn.base.BaseEstimator, sklearn.base.TransformerMixin):
+    """Raise unless the input holds every band of the filter-bank paradigm."""
+
+    def __init__(self, n_bands=1):
+        self.n_bands = n_bands
+
+    def _check(self, X):
+        if X.ndim != 4 or X.shape[-1] != self.n_bands:
+            raise ValueError(
+                f"expected {self.n_bands} filter bands on the last axis, got X of shape {X.shape}"
+            )
+
+    def fit(self, X, y=None):
+        self._check(X)
+        return self
+
+    def transform(self, X):
+        self._check(X)
+        return X.reshape(len(X), -1)
+
+
+@pytest.mark.parametrize(
+    "evaluation_class",
+    [ev.WithinSessionEvaluation, ev.CrossSessionEvaluation, ev.CrossSubjectEvaluation],
+)
+def test_filterbank_paradigm_reaches_pipeline_with_every_band(evaluation_class, tmp_path):
+    # Regression: the evaluations passed only the first band's processing
+    # pipeline to ``get_data``, so filter-bank pipelines saw a single band.
+    from moabb.paradigms import FilterBankLeftRightImagery
+
+    paradigm = FilterBankLeftRightImagery()
+    n_bands = len(paradigm.filters)
+    data = FakeDataset(["left_hand", "right_hand"], n_subjects=2, n_sessions=2, seed=7)
+    pipeline = make_pipeline(_EveryBand(n_bands=n_bands), LDA())
+    evaluation = evaluation_class(
+        paradigm=paradigm, datasets=[data], hdf5_path=str(tmp_path), overwrite=True
+    )
+    results = evaluation.process({"every-band": pipeline})
+    assert len(results) > 0
+    assert np.isfinite(results["score"]).all()
+
+
+def test_saved_fold_models_can_be_unpickled(tmp_path):
+    # Regression: _ensure_fitted marked each fitted step that lacks
+    # __sklearn_is_fitted__ with a method bound to a local function, which
+    # pickle stores as getattr(step, "_sklearn_is_fitted_true"), so every model
+    # saved with save_model=True failed to load (AttributeError).
+    ds = FakeDataset(["left_hand", "right_hand"], n_subjects=1, n_sessions=1, seed=5)
+    evaluation = ev.WithinSessionEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[ds],
+        hdf5_path=str(tmp_path),
+        save_model=True,
+        overwrite=True,
+    )
+    evaluation.process({"CSP+LDA": make_pipeline(Covariances("oas"), CSP(4), LDA())})
+
+    saved = sorted(tmp_path.rglob("fitted_model_*.pkl"))
+    assert saved
+    for path in saved:
+        with open(path, "rb") as file:
+            model = pickle.load(file)
+        check_is_fitted(model)
+        assert model[-1].__sklearn_is_fitted__()
+
+
+def test_cross_subject_leave_one_dataset_out(tmp_path):
+    from moabb.datasets.compound_dataset import CompoundDataset
+
+    a, b = (
+        FakeDataset(["left_hand", "right_hand"], n_subjects=2, n_sessions=1, seed=s)
+        for s in (1, 2)
+    )
+    b.code = "FakeDatasetB"
+    pool = CompoundDataset(
+        [(d, s, None, None) for d in (a, b) for s in d.subject_list],
+        code="CompoundDatasetAB",
+        interval=a.interval,
+    )
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[pool],
+        cv_class=LeaveOneGroupOut,
+        groups="dataset",
+        hdf5_path=str(tmp_path),
+        overwrite=True,
+    )
+    results = evaluation.process(
+        {"CSP+LDA": make_pipeline(Covariances("oas"), CSP(2), LDA())}
+    )
+    # Each subject is scored once, by the model trained on the other dataset only.
+    assert sorted(results["subject"].astype(int)) == [1, 2, 3, 4]
+    # Both folds train on two subjects of one dataset: half of the trials.
+    _, y, _ = FakeImageryParadigm().get_data(pool)
+    assert set(results["samples"]) == {len(y) / 2}
+
+
+def test_cross_subject_on_nested_trials_of_different_shapes(tmp_path):
+    # Datasets with different montages and rates pooled in a CompoundDataset
+    # give nested trials; leave-one-dataset-out runs on them unchanged.
+    from moabb.datasets.compound_dataset import CompoundDataset
+    from moabb.paradigms import LeftRightImagery
+
+    systems = [
+        FakeDataset(
+            ["left_hand", "right_hand"], channels=ch, n_subjects=2, sfreq=sf, seed=i
+        )
+        for i, (ch, sf) in enumerate(
+            ((("C3", "Cz", "C4", "Pz"), 128), (("C3", "C4"), 256))
+        )
+    ]
+    pool = CompoundDataset(
+        [(d, s, None, None) for d in systems for s in d.subject_list],
+        code="CompoundDatasetNested",
+        interval=systems[0].interval,
+    )
+    origin = np.array([d.code for d, *_ in pool.subjects_list])
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=LeftRightImagery(),
+        datasets=[pool],
+        cv_class=LeaveOneGroupOut,
+        groups=lambda m: origin[m["subject"].astype(int).to_numpy() - 1],
+        hdf5_path=str(tmp_path),
+        overwrite=True,
+    )
+    log_var = FunctionTransformer(lambda X: np.array([[np.log(np.var(t))] for t in X]))
+    results = evaluation.process({"var": make_pipeline(log_var, LDA())})
+
+    # 2 systems x 2 subjects x 2 sessions, each system held out once
+    assert len(results) == 8 and np.isfinite(results["score"]).all()
+    assert set(results["channels"]) == {4}
+
+
+def test_cross_subject_leave_one_device_out(tmp_path):
+    # A device can span datasets: Amp X records datasets A and B, Amp Y C.
+    from moabb.datasets.compound_dataset import CompoundDataset
+
+    a, b, c = (
+        FakeDataset(["left_hand", "right_hand"], n_subjects=2, n_sessions=1, seed=s)
+        for s in (1, 2, 3)
+    )
+    b.code, c.code = "FakeDatasetB", "FakeDatasetC"
+    a._device = b._device = lambda subject, session: "Amp X"
+    c._device = lambda subject, session: "Amp Y"
+    pool = CompoundDataset(
+        [(d, s, None, None) for d in (a, b, c) for s in d.subject_list],
+        code="CompoundDatasetABC",
+        interval=a.interval,
+    )
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[pool],
+        cv_class=LeaveOneGroupOut,
+        groups="device",
+        hdf5_path=str(tmp_path),
+        overwrite=True,
+    )
+    results = evaluation.process(
+        {"CSP+LDA": make_pipeline(Covariances("oas"), CSP(2), LDA())}
+    ).sort_values("subject")
+    _, y, _ = FakeImageryParadigm().get_data(pool)
+    per_subject = len(y) / 6
+    # Amp X subjects (1-4) train on Amp Y's two subjects, and the reverse.
+    assert list(results["samples"]) == [2 * per_subject] * 4 + [4 * per_subject] * 2
+
+
+def test_leave_one_device_out_routes_the_training_devices(tmp_path):
+    from sklearn import config_context
+
+    from moabb.datasets.compound_dataset import CompoundDataset
+
+    a, b, c = (
+        FakeDataset(
+            ["left_hand", "right_hand"], n_subjects=1, n_sessions=1, seed=s, device=d
+        )
+        for s, d in ((1, "Amp X"), (2, "Amp X"), (3, "Amp Y"))
+    )
+    b.code, c.code = "FakeDatasetB", "FakeDatasetC"
+    pool = CompoundDataset(
+        [(d, 1, None, None) for d in (a, b, c)],
+        code="CompoundDatasetABC",
+        interval=a.interval,
+    )
+    _EXTRA_CAPTURE.clear()
+    with config_context(enable_metadata_routing=True):
+        step = _ExtraRecorder().set_fit_request(device=True)
+    evaluation = ev.CrossSubjectEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[pool],
+        cv_class=LeaveOneGroupOut,
+        groups="device",
+        hdf5_path=str(tmp_path),
+        overwrite=True,
+    )
+    results = evaluation.process(
+        {"P": make_pipeline(step, Covariances("oas"), CSP(2), LDA())}
+    )
+    assert len(results) == 3
+    # One fold per device; each model only saw the other device.
+    seen = sorted(tuple(sorted(set(devices))) for devices in _EXTRA_CAPTURE)
+    assert seen == [("Amp X",), ("Amp Y",)]

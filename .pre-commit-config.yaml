@@ -33,18 +33,18 @@ repos:
 
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.20
+    rev: v0.16.10
     hooks:
       - id: ruff
         args: [ --fix, --exit-non-zero-on-fix ]
       - id: ruff-format
 
   - repo: https://github.com/codespell-project/codespell
-    rev: v2.4.2
+    rev: v2.4.3
     hooks:
       - id: codespell
         args:
-          - --ignore-words-list=assertIn,additionals,alle,alot,bund,currenty,datas,farenheit,falsy,fo,haa,hass,iif,incomfort,ines,ist,nam,nd,pres,pullrequests,resset,rime,ser,serie,te,technik,ue,unsecure,withing,zar,crate,Perfomances,Aline,aline,ALS,covert,Buss,GES,pary,theses,sems
+          - --ignore-words-list=assertIn,additionals,alle,alot,bund,currenty,datas,farenheit,falsy,fo,haa,hass,iif,incomfort,ines,infarction,ist,nam,nd,pres,pullrequests,resset,rime,ser,serie,te,technik,ue,UNER,unsecure,withing,zar,crate,Perfomances,Aline,aline,ALS,covert,Buss,GES,pary,theses,sems
           - --skip=./.*,*.csv,*.json,*.ambr
           - --quiet-level=2
         exclude_types: [ csv, json, svg, pdf ]

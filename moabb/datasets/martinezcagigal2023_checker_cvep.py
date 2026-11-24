@@ -13,10 +13,16 @@ from moabb.datasets.base import BaseDataset
 from moabb.datasets.bson_loader import load_bson
 from moabb.datasets.metadata.schema import (
     AcquisitionMetadata,
+    BCIApplicationMetadata,
+    CrossValidationMetadata,
     DatasetMetadata,
+    DataStructureMetadata,
     DocumentationMetadata,
     ExperimentMetadata,
+    ParadigmSpecificMetadata,
     ParticipantMetadata,
+    SignalProcessingMetadata,
+    Tags,
 )
 from moabb.datasets.utils import (
     add_stim_channel_epoch,
@@ -69,7 +75,7 @@ class MartinezCagigal2023Checker(BaseDataset):
     using binary m-sequences. The conditions were tested in a 9-command
     speller. The stimulus was composed of a black-background checkerboard
     (BB-CB) pattern, i.e. event 1 was encoded with a checkerboard pattern and
-    event 0 with a white flash. The stimuli were encoded using circularly
+    event 0 with a black flash. The stimuli were encoded using circularly
     shifting versions of a 63-bit binary m-sequence. The different conditions
     evaluated different spatial frequency variations of the BB-CB pattern
     (i.e., the number of squares inside the checkerboard pattern).
@@ -100,9 +106,10 @@ class MartinezCagigal2023Checker(BaseDataset):
 
     The encoding was displayed at a 120 Hz refresh rate. EEG signals were
     recorded using a g.USBamp amplifier (g.Tec, Guger Technologies, Austria)
-    with 16 active electrodes and a sampling rate of 256 Hz. Electrodes were
-    placed at: Oz, F3, Fz, F4, I1, I2, C3, Cz, C4, CPz, P3, Pz, P4, PO7, POz,
-    PO8, grounded at AFz and referenced to the earlobe.
+    with 16 channels and a sampling rate of 256 Hz. The paper lists fifteen
+    active electrodes (F3, Fz, F4, C3, Cz, C4, CPz, P3, Pz, P4, PO7, PO8, Oz,
+    I1 and I2), referenced to the right earlobe and grounded at AFz; the
+    released recordings contain 16 EEG channels (the above plus POz).
 
     The experimental paradigm was executed using the MEDUSA© software [3]_.
 
@@ -143,10 +150,101 @@ class MartinezCagigal2023Checker(BaseDataset):
     """
 
     METADATA = DatasetMetadata(
-        acquisition=AcquisitionMetadata(sampling_rate=256.0, channel_types={"eeg": 16}),
-        participants=ParticipantMetadata(n_subjects=16),
-        experiment=ExperimentMetadata(paradigm="cvep"),
+        acquisition=AcquisitionMetadata(
+            sampling_rate=256.0,
+            channel_types={"eeg": 16},
+            sensors=[
+                "F3",
+                "Fz",
+                "F4",
+                "C3",
+                "Cz",
+                "C4",
+                "CPz",
+                "P3",
+                "Pz",
+                "P4",
+                "PO7",
+                "PO8",
+                "Oz",
+                "I1",
+                "I2",
+                "POz",
+            ],
+            sensor_type="active",
+            montage="standard_1005",
+            line_freq=50.0,
+            reference="right earlobe",
+            ground="AFz",
+            hardware="g.USBamp (g.tec)",
+            software="MEDUSA",
+        ),
+        participants=ParticipantMetadata(
+            n_subjects=16,
+            health_status="healthy",
+            gender={"male": 11, "female": 5},
+            age_mean=29.63,
+            age_std=4.06,
+            bci_experience="mixed",
+            species="homo sapiens",
+        ),
+        experiment=ExperimentMetadata(
+            trial_duration=4.2,
+            events={"0.0": 100, "1.0": 101},
+            class_labels=["0.0", "1.0"],
+            n_classes=2,
+            paradigm="cvep",
+            task_type="cvep_speller",
+            study_design=(
+                "Within-subject evaluation of 8 spatial frequency conditions of a "
+                "black-background checkerboard (BB-CB) pattern in a 9-command "
+                "circular-shifting m-sequence c-VEP speller."
+            ),
+            feedback_type="visual",
+            stimulus_type="black-background checkerboard (BB-CB) m-sequence flash",
+            stimulus_modalities=["visual"],
+            primary_modality="visual",
+            synchronicity="synchronous",
+            mode="both",
+            has_training_test_split=True,
+        ),
+        sessions_per_subject=8,
+        runs_per_session=3,
+        file_format="BSON (MEDUSA)",
+        data_processed=False,
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="cvep",
+            code_type="m-sequence",
+            code_length=63,
+            n_targets=9,
+            n_repetitions=8,
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials=384,
+            n_blocks=8,
+            trials_context=(
+                "8 conditions x 48 trials per condition (30 calibration trials across "
+                "2 runs + 18 online test trials in 1 run), each trial comprising 8 "
+                "cycles of a 63-bit m-sequence at 120 Hz (0.525 s/cycle, 4.2 s/trial)."
+            ),
+        ),
+        signal_processing=SignalProcessingMetadata(
+            classifiers=["CCA"],
+            feature_extraction=["canonical_correlation_analysis"],
+            frequency_bands={"broadband": [1.0, 60.0]},
+            spatial_filters=["CCA"],
+        ),
+        cross_validation=CrossValidationMetadata(
+            cv_method="calibration-then-test", evaluation_type=["within_subject"]
+        ),
+        performance={"accuracy_8cycles_c5": 99.31, "itr_8cycles_c5_bits_per_min": 43.39},
+        bci_application=BCIApplicationMetadata(
+            applications=["speller"], environment="laboratory", online_feedback=True
+        ),
+        tags=Tags(pathology=["Healthy"], modality=["Visual"], type=["c-VEP"]),
         documentation=DocumentationMetadata(
+            repository="UVaDOC (University of Valladolid)",
+            license="CC-BY-NC-SA-4.0",
             doi="10.71569/7c67-v596",
             associated_paper_doi="10.3389/fnhum.2023.1288438",
             related_paper_dois=["10.1016/j.cmpb.2023.107357"],
@@ -159,13 +257,25 @@ class MartinezCagigal2023Checker(BaseDataset):
                 "Roberto Hornero",
             ],
             senior_author="Roberto Hornero",
-            institution="University of Valladolid",
+            institution="University of Valladolid; University of Malaga",
             institution_department="Biomedical Engineering Group, ETSIT",
             institution_address="Paseo de Belén, 15, 47011, Valladolid, Spain",
             country="ES",
-            contact_info=["victor.martinez@gib.tel.uva.es"],
+            contact_info=["afernandezrguez@uma.es", "victor.martinez@gib.tel.uva.es"],
             ethics_approval=[
-                "Approved by the local ethics committee; all participants provided informed consent"
+                "Local Ethics Committee of the University of Valladolid (No. PI 22-2912)"
+            ],
+            funding=[
+                "Ministerio de Ciencia e Innovación/Agencia Estatal de Investigación and ERDF (TED2021-129915B-I00, RTC2019-007350-1, PID2020-115468RB-I00, PID2021-127261OB-I00)",
+                "CIBER-BBN through Instituto de Salud Carlos III",
+                "University of Malaga",
+            ],
+            keywords=[
+                "brain-computer interface (BCI)",
+                "code-modulated visual evoked potential (c-VEP)",
+                "spatial frequency",
+                "checkerboard",
+                "user experience",
             ],
             data_url="https://doi.org/10.71569/7c67-v596",
             how_to_acknowledge=(
@@ -328,7 +438,7 @@ class MartinezCagigal2023Checker(BaseDataset):
         info["subject_info"] = {"his_id": str(rec["subject_id"])}
         info["description"] = str(rec["recording_id"])
         info.set_meas_date(meas_date.replace(tzinfo=timezone.utc))
-        info.set_montage("standard_1005", match_case=False, on_missing="warn")
+        info.set_montage("colin27_1005", match_case=False, on_missing="warn")
 
         # Set data (signal shape is samples x channels, need to transpose).
         # The BSON files store EEG in microvolts; convert to Volts for MNE.

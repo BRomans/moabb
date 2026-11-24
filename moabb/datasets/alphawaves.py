@@ -48,13 +48,16 @@ class Rodrigues2017(BaseDataset):
     A total of 20 volunteers participated in the experiment (7 females), with
     mean (sd) age 25.8 (5.27) and median 25.5. 18 subjects were between 19 and
     28 years old. Two participants with age 33 and 44 were outside this range.
+    MOABB exposes 19 of the 20 recorded subjects (subject 7 is skipped by
+    the loader); the Zenodo record and the report describe all 20.
 
     II. Procedures
 
     EEG signals were acquired using a standard research grade amplifier
     (g.USBamp, g.tec, Schiedlberg, Austria) and the EC20 cap equipped with 16
     wet electrodes (EasyCap, Herrsching am Ammersee, Germany), placed according
-    to the 10-20 international system.
+    to the 10-10 international system. The reference was placed on the
+    right earlobe and the ground at the AFz scalp location.
     We acquired the data with no digital filter and a sampling frequency of 512Hz
     was used.
 
@@ -90,10 +93,13 @@ class Rodrigues2017(BaseDataset):
         acquisition=AcquisitionMetadata(
             sampling_rate=512.0,
             channel_types={"eeg": 16},
-            montage="standard_1020",
+            montage="standard_1005",
             hardware="g.tec g.USBamp",
             sensor_type="wet electrodes",
             reference="right earlobe",
+            ground="AFz",
+            cap_manufacturer="EasyCap",
+            cap_model="EC20",
             software="OpenViBE",
             filters="no digital filter",
             sensors=[
@@ -119,10 +125,54 @@ class Rodrigues2017(BaseDataset):
         participants=ParticipantMetadata(
             n_subjects=19,
             health_status="healthy",
-            gender={"female": 7, "male": 13},
+            gender={"female": 7, "male": 12},
             age_mean=25.8,
             age_std=5.27,
             age_median=25.5,
+            age_min=19,
+            age_max=44,
+            ages=[
+                27,
+                23,
+                44,
+                26,
+                26,
+                26,
+                19,
+                19,
+                26,
+                25,
+                22,
+                22,
+                33,
+                24,
+                25,
+                26,
+                28,
+                24,
+                26,
+            ],
+            sexes=[
+                "male",
+                "male",
+                "male",
+                "male",
+                "male",
+                "male",
+                "male",
+                "male",
+                "female",
+                "female",
+                "male",
+                "male",
+                "male",
+                "male",
+                "female",
+                "female",
+                "female",
+                "female",
+                "female",
+            ],
         ),
         experiment=ExperimentMetadata(
             events={"closed": 1, "open": 2},
@@ -151,6 +201,12 @@ class Rodrigues2017(BaseDataset):
             repository="Zenodo",
             data_url="https://doi.org/10.5281/zenodo.2348891",
             license="CC-BY-4.0",
+            keywords=[
+                "Electroencephalography (EEG)",
+                "occipital dominant rhythm",
+                "alpha waves",
+                "experimentation",
+            ],
             how_to_acknowledge=(
                 "Please cite: Cattan, Rodrigues & Congedo (2018). "
                 "EEG Alpha Waves Dataset. GIPSA-lab Research Report. "
@@ -171,7 +227,14 @@ class Rodrigues2017(BaseDataset):
         ),
         bci_application=BCIApplicationMetadata(applications=None),
         paradigm_specific=ParadigmSpecificMetadata(detected_paradigm="rstate"),
-        data_structure=DataStructureMetadata(n_trials=10, n_blocks=10),
+        data_structure=DataStructureMetadata(
+            n_trials=10,
+            n_trials_per_class={"closed": 5, "open": 5},
+            n_blocks=10,
+            block_duration_s=10.0,
+            trials_context="one session of ten 10 s blocks per subject (5 eyes closed, 5 eyes open)",
+        ),
+        file_format="mat",
         data_processed=False,
     )
     nemar_id = "nm000221"
@@ -185,7 +248,7 @@ class Rodrigues2017(BaseDataset):
             code="Rodrigues2017",
             interval=[0, 10],
             paradigm="rstate",
-            doi="https://doi.org/10.5281/zenodo.2348892",
+            doi="10.5281/zenodo.2348891",
             selected_subjects=subjects,
             selected_sessions=sessions,
         )
@@ -228,7 +291,7 @@ class Rodrigues2017(BaseDataset):
             ch_names=chnames, sfreq=512, ch_types=chtypes, verbose=False
         )
         raw = mne.io.RawArray(data=X, info=info, verbose=False)
-        raw.set_montage("standard_1020")
+        raw.set_montage("colin27_1020")
 
         return {"0": {"0": raw}}
 

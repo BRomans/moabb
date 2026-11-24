@@ -99,6 +99,7 @@ class Zhang2025(BaseDataset):
     """
 
     nemar_id = "nm000211"
+    nemar_seed_cache = True
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=1000.0,
@@ -115,8 +116,8 @@ class Zhang2025(BaseDataset):
             gender={"female": 6, "male": 9},
             age_min=22,
             age_max=26,
-            handedness="all right-handed",
-            species="human",
+            handedness="right",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             events={"Target": 2, "NonTarget": 1},
@@ -135,6 +136,13 @@ class Zhang2025(BaseDataset):
             mode="offline",
         ),
         documentation=DocumentationMetadata(
+            senior_author="Chen Yang",
+            funding=[
+                "National Natural Science Foundation of China (Grants 62376035, 62006024, U2241208, 62071057)",
+                "Fundamental Research Funds for the Central Universities (Grant 2023RC26)",
+            ],
+            ethics_approval=["Tsinghua Institutional Review Board"],
+            repository="Figshare",
             doi=_DOI,
             investigators=[
                 "Yufeng Zhang",
@@ -161,7 +169,7 @@ class Zhang2025(BaseDataset):
             trials_context="per session (4 blocks x 8 sequences x 200 images)",
         ),
         signal_processing=SignalProcessingMetadata(
-            classifiers=["HDCA"],
+            classifiers=["HDCA", "SWLDA", "BLDA"],
             feature_extraction=["HDCA"],
             frequency_bands={"ERP_dominant": [0.0, 10.0]},
             spatial_filters=None,
@@ -243,7 +251,7 @@ class Zhang2025(BaseDataset):
                 ch_types = ["eeg"] * 57 + ["stim"]
                 info = mne.create_info(ch_names, 1000.0, ch_types)
                 raw = mne.io.RawArray(all_data, info, verbose=False)
-                raw.set_montage("standard_1020", on_missing="warn")
+                raw.set_montage("colin27_1020", on_missing="warn")
 
                 runs[str(block_idx)] = raw
 

@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import requests
 
+from ._openneuro_mirror import OpenNeuroMirrorMixin
 from .base import BaseBIDSDataset
 from .download import get_dataset_path
 from .metadata.schema import (
@@ -78,7 +79,7 @@ _DATASET_DESCRIPTION = {
 }
 
 
-class TrianaGuzman2024(BaseBIDSDataset):
+class TrianaGuzman2024(OpenNeuroMirrorMixin, BaseBIDSDataset):
     """Sit-stand motor imagery dataset from Triana-Guzman et al 2022.
 
     Dataset from the article *Decoding EEG Rhythms Offline and Online
@@ -94,14 +95,20 @@ class TrianaGuzman2024(BaseBIDSDataset):
     - **MotorImageryB**: Standing, imagining sit-down movement
     - **IdleStateB**: Standing, no imagery (idle)
 
-    Each trial consists of 4 s fixation, ~2 s action observation,
-    ~1 s preparation cue, 4 s motor imagery/idle, and 4 s rest
-    (~15 s total).
+    Each trial in the offline phase consists of 4 s fixation, 3 s action
+    observation, 4 s motor imagery/idle, and 4 s rest (15 s total).
 
     The data is hosted on OpenNeuro in BIDS format (.set files).
     Both offline and online phases are recorded in a single
     continuous file per subject. By default, only offline MI task
     markers (events 1-4) are used for epoching.
+
+    Per participant the offline phase holds six runs of 30 trials
+    (45 MotorImageryA + 45 IdleStateA, 45 MotorImageryB + 45
+    IdleStateB) and the online phase 60 further trials. The OpenNeuro
+    README states the ground at AFz and the reference at the right
+    mastoid (M2); the paper [1]_ describes the reference electrode as
+    placed in the right earlobe.
 
     Parameters
     ----------
@@ -119,6 +126,7 @@ class TrianaGuzman2024(BaseBIDSDataset):
     """
 
     nemar_id = "on005342"
+    nemar_subject_template = "{subject:03d}"
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=250.0,
@@ -128,6 +136,7 @@ class TrianaGuzman2024(BaseBIDSDataset):
             sensor_type="active wet (g.LADYbird)",
             reference="right mastoid (M2)",
             ground="AFz",
+            impedance_threshold_kohm=30.0,
             filters={"bandpass": [0.01, 60]},
             sensors=list(_CH_NAMES),
             line_freq=60.0,
@@ -139,9 +148,10 @@ class TrianaGuzman2024(BaseBIDSDataset):
             age_min=19.0,
             age_max=29.0,
             age_mean=22.4,
+            age_std=2.3,
             handedness={"right": 29, "left": 3},
             bci_experience="naive",
-            species="human",
+            species="homo sapiens",
             # fmt: off
             ages=[
                 22,
@@ -266,6 +276,13 @@ class TrianaGuzman2024(BaseBIDSDataset):
             mode="offline",
         ),
         documentation=DocumentationMetadata(
+            senior_author="Javier M. Antelis",
+            funding=[
+                "Minciencias/Colciencias contract 594-2019 (project 80740-594-2019)",
+                "University of Illinois Chicago and Tecnologico de Monterrey (UIC-TEC) Seed funding Program 2021-2022",
+            ],
+            ethics_approval=["Ethics Committee of the Universidad Antonio Nariño"],
+            repository="OpenNeuro",
             doi="10.3389/fninf.2022.961089",
             investigators=[
                 "Nayid Triana-Guzman",
@@ -290,7 +307,7 @@ class TrianaGuzman2024(BaseBIDSDataset):
         ),
         data_structure=DataStructureMetadata(
             n_trials=7680,
-            trials_context=("32 subjects x ~240 trials (offline, variable per subject)"),
+            trials_context="32 subjects x 240 trials (180 offline + 60 online)",
         ),
         signal_processing=SignalProcessingMetadata(
             classifiers=["RLDA"],
@@ -373,6 +390,15 @@ class TrianaGuzman2024(BaseBIDSDataset):
         """Download BIDS data from OpenNeuro S3 and return the BIDS root path."""
         if subject not in self.subject_list:
             raise ValueError("Invalid subject number")
+
+        subj_str = f"sub-{subject:03d}"
+        # The NEMAR raw mirror holds the same OpenNeuro files.
+        mirror_root = self._mirror_root(subject, path, force_update, update_path, verbose)
+        if mirror_root is not None:
+            Path(mirror_root).mkdir(parents=True, exist_ok=True)
+            self._ensure_dataset_description(Path(mirror_root))
+            self._fix_events_tsv_decimals(Path(mirror_root) / subj_str / "eeg")
+            return mirror_root
 
         bids_root = Path(get_dataset_path("TrianaGuzman2024", path))
         bids_root = bids_root / "MNE-trianaguzman2024-data"

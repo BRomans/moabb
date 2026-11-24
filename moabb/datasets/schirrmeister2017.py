@@ -59,6 +59,11 @@ class Schirrmeister2017(BaseDataset):
     2004).  The experiment was approved by the ethical committee of the University
     of Freiburg.
 
+    The GIN repository README adds that the recordings were referenced to Cz
+    (with some residual signal remaining on Cz) and that for subject 14 about
+    half of the sensors lost meaningful signal in the test set; the data are
+    released under CC BY 4.0 (LICENSE.txt).
+
     References
     ----------
 
@@ -73,7 +78,7 @@ class Schirrmeister2017(BaseDataset):
             sampling_rate=500.0,
             channel_types={"eeg": 128},
             hardware=None,
-            reference=None,
+            reference="Cz",
             sensors=[
                 "Fp1",
                 "Fp2",
@@ -220,9 +225,11 @@ class Schirrmeister2017(BaseDataset):
         ),
         experiment=ExperimentMetadata(
             paradigm="imagery",
+            task_type="executed movement (left hand finger-tapping, right hand finger-tapping, feet toe-clenching, rest)",
             n_classes=4,
-            class_labels=["left_hand", "right_hand", "feet", "rest"],
+            class_labels=["right_hand", "left_hand", "rest", "feet"],
             study_design="Executed movements including left hand (sequential finger-tapping), right hand (sequential finger-tapping), feet (repetitive toe clenching), and rest conditions",
+            feedback_type="none",
             stimulus_type="visual",
             stimulus_modalities=["visual"],
             primary_modality="visual",
@@ -283,17 +290,13 @@ class Schirrmeister2017(BaseDataset):
                 "neural networks for EEG decoding and visualization. Human Brain Mapping, "
                 "38(11), 5391-5420. https://doi.org/10.1002/hbm.23730"
             ),
-            repository="GitHub",
+            repository="GIN",
             data_url="https://web.gin.g-node.org/robintibor/high-gamma-dataset/",
             license="CC-BY-4.0",
         ),
         sessions_per_subject=1,
         runs_per_session=2,
-        tags=Tags(
-            pathology=["Healthy"],
-            modality=["Motor"],
-            type=["Motor Imagery", "Motor Execution"],
-        ),
+        tags=Tags(pathology=["Healthy"], modality=["Motor"], type=["Motor Execution"]),
         preprocessing=PreprocessingMetadata(
             data_state=None,
             preprocessing_applied=None,
@@ -322,8 +325,8 @@ class Schirrmeister2017(BaseDataset):
         ),
         performance={
             "FBCSP_accuracy_percent": 91.2,
-            "Deep_ConvNet_accuracy_percent": 89.3,
-            "Shallow_ConvNet_accuracy_percent": 92.5,
+            "Deep_ConvNet_accuracy_percent": 92.5,
+            "Shallow_ConvNet_accuracy_percent": 89.3,
         },
         bci_application=BCIApplicationMetadata(
             applications=["motor_control"],
@@ -409,7 +412,7 @@ class Schirrmeister2017(BaseDataset):
 
         # Select only EEG sensors (remove EOG, EMG) if return_all_modalities is False,
         # and also set montage for visualizations
-        montage = make_standard_montage("standard_1005")
+        montage = make_standard_montage("colin27_1005")
         for raw in (train_raw, test_raw):
             if not self.return_all_modalities:
                 raw.pick_types(eeg=True)

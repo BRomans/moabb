@@ -182,25 +182,38 @@ class BNCI2019_001(BaseDataset):
             health_status="patients",
             gender={"male": 9, "female": 1},
             age_mean=49.8,
+            age_std=17.54,
             age_min=20,
             age_max=78,
             ages=[35, 42, 62, 20, 57, 78, 27, 69, 53, 55],
-            handedness="right-handed (all participants originally)",
+            sexes=[
+                "male",
+                "male",
+                "male",
+                "male",
+                "male",
+                "female",
+                "male",
+                "male",
+                "male",
+                "male",
+            ],
+            handedness={"right": 10},
             clinical_population="spinal cord injury",
-            species="human",
+            species="homo sapiens",
         ),
         experiment=ExperimentMetadata(
             paradigm="imagery",
             task_type="attempted movement",
             n_classes=5,
             class_labels=[
+                "supination",
+                "pronation",
                 "hand_open",
                 "palmar_grasp",
                 "lateral_grasp",
-                "pronation",
-                "supination",
             ],
-            trial_duration=5.0,
+            trial_duration=3.0,
             tasks=[
                 "hand_open",
                 "palmar_grasp",
@@ -209,20 +222,20 @@ class BNCI2019_001(BaseDataset):
                 "supination",
             ],
             study_design="motor imagery and attempted movements",
-            feedback_type="visual feedback (online paradigm only - movement icon displayed when movement detected)",
+            feedback_type="none",
             stimulus_type="visual cue",
             stimulus_modalities=["visual", "auditory"],
             primary_modality="visual",
             synchronicity="synchronous",
-            mode="both",
+            mode="offline",
             has_training_test_split=True,
             instructions="Participants were instructed to attempt or execute movements based on class cue displayed on screen. They were asked to focus gaze on fixation cross, avoid eye movements, swallowing, and blinking during trial period.",
             events={
-                "hand_open": 1,
-                "palmar_grasp": 2,
-                "lateral_grasp": 3,
-                "pronation": 4,
-                "supination": 5,
+                "supination": 776,
+                "pronation": 777,
+                "hand_open": 779,
+                "palmar_grasp": 925,
+                "lateral_grasp": 926,
             },
         ),
         documentation=DocumentationMetadata(
@@ -239,7 +252,7 @@ class BNCI2019_001(BaseDataset):
             institution="Graz University of Technology",
             institution_department="Institute of Neural Engineering, BCI-Lab",
             institution_address="Graz, Austria",
-            country="Austria",
+            country="AT",
             repository="Zenodo",
             data_url="https://doi.org/10.5281/zenodo.2222268",
             license="CC-BY-4.0",
@@ -255,28 +268,15 @@ class BNCI2019_001(BaseDataset):
         ),
         tags=Tags(pathology=["Spinal Cord Injury"], modality=["Motor"], type=["Motor"]),
         preprocessing=PreprocessingMetadata(
-            data_state="raw (GDF format)",
-            preprocessing_applied=True,
-            preprocessing_steps=[
-                "bandpass filter",
-                "notch filter",
-                "ICA",
-                "artifact rejection",
-            ],
+            data_state="raw",
+            preprocessing_applied=False,
             highpass_hz=0.01,
-            lowpass_hz=100,
+            lowpass_hz=100.0,
             bandpass={"low_cutoff_hz": 0.01, "high_cutoff_hz": 100.0},
             notch_hz=[50],
             filter_type="Chebyshev",
             filter_order=8,
-            artifact_methods=[
-                "ICA",
-                "visual inspection",
-                "abnormal joint probability",
-                "abnormal kurtosis",
-            ],
-            re_reference="CAR",
-            notes="Noisy channels were visually inspected and removed. AFz was removed by default as it is sensitive to eye blinks and eye movements. ICA was performed on 0.3-70 Hz filtered signals using extended infomax. PCA dimensionality reduction retained 99% variance. Artifact-contaminated ICs (muscle and eye-related) were removed. Trials with values above/below ±100 μV, abnormal joint probabilities, or abnormal kurtosis (5x SD threshold) were rejected. Final analysis used 0.3-3 Hz bandpass filter.",
+            notes="Distributed GDF files contain raw 64-channel data (61 EEG + 3 EOG) sampled at 256 Hz with hardware 0.01-100 Hz bandpass and 50 Hz notch filters. In the paper's offline analysis, AFz was removed, ICA artifact removal and trial rejection were applied, and signals were bandpass filtered 0.3-3 Hz.",
         ),
         signal_processing=SignalProcessingMetadata(
             classifiers=["Shrinkage LDA", "sLDA"],
@@ -306,7 +306,7 @@ class BNCI2019_001(BaseDataset):
         bci_application=BCIApplicationMetadata(
             applications=["neuroprosthetic", "upper_limb_control", "hand_grasp_control"],
             environment="indoor",
-            online_feedback=True,
+            online_feedback=False,
         ),
         paradigm_specific=ParadigmSpecificMetadata(
             detected_paradigm="imagery",
@@ -372,7 +372,7 @@ class BNCI2019_001(BaseDataset):
     def _get_single_subject_data(self, subject):
         """Return data for a single subject."""
         file_paths = self.data_path(subject)
-        montage = make_standard_montage("standard_1005")
+        montage = make_standard_montage("colin27_1005")
         eog_channels = ["eog-l", "eog-m", "eog-r"]
         data = {}
         for run_idx, path in enumerate(file_paths):
@@ -402,8 +402,13 @@ class BNCI2019_001(BaseDataset):
                 f"Invalid subject number {subject}. Valid: {self.subject_list}"
             )
         url = f"{BNCI_URL_001_2019}P{subject:02d}.zip"
-        zip_path = dl.data_dl(url, "BNCI", path, force_update, verbose)
-        zip_dir = Path(zip_path).parent
+        zip_dir = dl.data_dl_destination(url, "BNCI", path).parent
+        needed = [
+            zip_dir / f"P{subject:02d} Run {run}.gdf" for run in self._MOVEMENT_RUNS
+        ]
+        if force_update or not dl.fill_from_store(zip_dir, needed):
+            zip_path = dl.data_dl(url, "BNCI", path, force_update, verbose)
+            zip_dir = Path(zip_path).parent
         if not (zip_dir / f"P{subject:02d} Run 3.gdf").exists():
             with zipfile.ZipFile(zip_path, "r") as z:
                 z.extractall(zip_dir)

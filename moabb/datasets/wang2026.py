@@ -160,7 +160,8 @@ _DOCUMENTATION = DocumentationMetadata(
     senior_author="Bin He",
     contact_info=["bhe1@andrew.cmu.edu"],
     associated_paper_doi=_PAPER_DOI,
-    funding=["NS124564", "NS131069", "NS127849", "NS096761"],
+    ethics_approval=["Institutional Review Board of Carnegie Mellon University"],
+    funding=["NS124564", "NS131069", "NS127849", "NS096761", "NIH T32 EB029365"],
     keywords=["motor imagery", "BCI", "joint learning", "tactile stimulation", "EEGNet"],
 )
 
@@ -169,6 +170,9 @@ _METADATA = DatasetMetadata(
     participants=ParticipantMetadata(
         n_subjects=39,
         health_status="healthy",
+        gender={"female": 18, "male": 13},
+        age_mean=23.8,
+        age_std=4.42,
         bci_experience="naive",
         species="homo sapiens",
     ),
@@ -205,7 +209,7 @@ _METADATA = DatasetMetadata(
     ),
     documentation=_DOCUMENTATION,
     sessions_per_subject=5,
-    runs_per_session=None,
+    runs_per_session=6,
     contributing_labs=[
         "Carnegie Mellon University Biomedical Functional Imaging and Neuroengineering Lab"
     ],
@@ -261,9 +265,9 @@ _METADATA = DatasetMetadata(
 
 
 class Wang2026(BaseDataset):
-    """Sensory-guided joint-learning MI-BCI study from Wang et al. (2026).
+    """Sensory-guided joint-learning MI-BCI study from Wang et al. (2026) [1]_.
 
-    The release contains 39 participants in four experimental groups:
+    The release [2]_ contains 39 participants in four experimental groups:
     joint-learning (15), BCI2000 control (8), tactile control (8), and an
     independently recruited EEGNet control (8). ``group`` filters these
     conditions while preserving globally unique MOABB subject IDs.
@@ -296,6 +300,13 @@ class Wang2026(BaseDataset):
        https://doi.org/10.1184/R1/32293995.v1
     """
 
+    nemar_id = "nm000335"
+    # The deposit's sourcedata_provenance.json files each subject as
+    # ``sub-<global id>`` (e.g. ``sub-1`` for JointLearning/S001).
+    nemar_subject_template = "sub-{subject}"
+    # data_path reads the extracted <group>/<S0NN>/*.mat before it opens the
+    # KiltHub archive, so the deposit's files are seeded there.
+    nemar_seed_cache = True
     METADATA = _METADATA
 
     def __init__(
@@ -387,7 +398,7 @@ class Wang2026(BaseDataset):
                 continue
 
             raw = build_raw_from_epochs(
-                epochs, _CHANNELS, _SFREQ, events, "standard_1005", scale=_EEG_SCALE
+                epochs, _CHANNELS, _SFREQ, events, "colin27_1005", scale=_EEG_SCALE
             )
             raw.info["line_freq"] = 60.0
             raw.info["subject_info"] = {"his_id": f"{archive}/{source_subject}"}

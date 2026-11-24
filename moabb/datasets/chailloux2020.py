@@ -12,6 +12,7 @@ import mne
 import numpy as np
 
 from . import download as dl
+from ._openneuro_mirror import OpenNeuroMirrorMixin
 from .base import BaseDataset
 from .metadata.schema import (
     AcquisitionMetadata,
@@ -48,7 +49,7 @@ def _subject_str(subject):
     return f"sub-0{subject}"
 
 
-class Chailloux2020(BaseDataset):
+class Chailloux2020(OpenNeuroMirrorMixin, BaseDataset):
     """P300 BCI dataset from Chailloux Peguero et al 2020.
 
     Dataset from the paper [1]_.
@@ -82,6 +83,8 @@ class Chailloux2020(BaseDataset):
     """
 
     nemar_id = "on003190"
+    # Same labels as _subject_str: sub-01 .. sub-09, then sub-010 .. sub-019.
+    nemar_subject_template = "0{subject}"
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=256.0,
@@ -120,6 +123,9 @@ class Chailloux2020(BaseDataset):
             mode="offline",
         ),
         documentation=DocumentationMetadata(
+            senior_author="Javier M. Antelis",
+            funding=["CONACyT Grant PN2015-873"],
+            repository="OpenNeuro",
             doi="10.3390/s20247198",
             investigators=[
                 "J. David Chailloux Peguero",
@@ -164,8 +170,7 @@ class Chailloux2020(BaseDataset):
 
     def _get_single_subject_data(self, subject):
         """Return {session: {run: Raw}}."""
-        self.data_path(subject)
-        base = self._subject_base(subject)
+        base = Path(self.data_path(subject))
         sessions = {}
 
         for ses_idx in range(1, 4):
@@ -223,7 +228,7 @@ class Chailloux2020(BaseDataset):
         if non_eeg:
             raw.drop_channels(non_eeg)
         raw.set_channel_types(dict.fromkeys(eeg_chs, "eeg"))
-        raw.set_montage("standard_1020", on_missing="warn")
+        raw.set_montage("colin27_1020", on_missing="warn")
 
         # Extract events from annotations.
         events, event_id = mne.events_from_annotations(raw, verbose=False)
@@ -277,8 +282,12 @@ class Chailloux2020(BaseDataset):
         if subject not in self.subject_list:
             raise ValueError("Invalid subject number")
 
-        base = self._subject_base(subject, path)
         subj_str = _subject_str(subject)
+        # The NEMAR raw mirror holds the same OpenNeuro BrainVision files.
+        mirror_root = self._mirror_root(subject, path, force_update, update_path, verbose)
+        if mirror_root is not None:
+            return str(Path(mirror_root) / subj_str)
+        base = self._subject_base(subject, path)
 
         import requests as _requests
 

@@ -60,7 +60,7 @@ _IVA2003_LEGACY_TO_1005 = {
 
 def _set_iva2003_montage(raw):
     """Set positions for all 118 channels via the modern 10-5 equivalents."""
-    pos = make_standard_montage("standard_1005").get_positions()["ch_pos"]
+    pos = make_standard_montage("colin27_1005").get_positions()["ch_pos"]
     ch_pos = {
         ch: pos[mapped]
         for ch in raw.ch_names
@@ -147,6 +147,9 @@ class BNCI2003_004(MNEBNCI):
     both types were recorded, while from the other subjects 3 sessions
     of type (2) and 1 session of type (1) were recorded.
 
+    Neither the competition description nor Dornhege et al. (2004) states the
+    reference or ground electrode.
+
     References
     ----------
     .. [1] Guido Dornhege, Benjamin Blankertz, Gabriel Curio, and Klaus-Robert
@@ -173,8 +176,10 @@ class BNCI2003_004(MNEBNCI):
         acquisition=AcquisitionMetadata(
             sampling_rate=100.0,
             channel_types={"eeg": 118},
+            montage="standard_1005",
             hardware="BrainAmp",
             reference=None,
+            ground=None,
             filters={"bandpass": [0.05, 200]},
             sensors=[
                 "AF3",
@@ -300,14 +305,18 @@ class BNCI2003_004(MNEBNCI):
             sensor_type="EEG",
             auxiliary_channels=None,
         ),
-        participants=ParticipantMetadata(n_subjects=5, health_status="healthy"),
+        participants=ParticipantMetadata(
+            n_subjects=5, health_status="healthy", species="homo sapiens"
+        ),
         experiment=ExperimentMetadata(
             events={"right_hand": 0, "feet": 1},
             paradigm="imagery",
             n_classes=2,
             class_labels=["right_hand", "feet"],
             trial_duration=3.5,
+            feedback_type="none",
             stimulus_type="visual cue",
+            synchronicity="synchronous",
             mode="offline",
             stimulus_presentation={
                 "duration": "3.5 s",
@@ -318,6 +327,7 @@ class BNCI2003_004(MNEBNCI):
         ),
         documentation=DocumentationMetadata(
             doi="10.1109/TBME.2004.827088",
+            data_url="https://www.bbci.de/competition/iii/",
             investigators=[
                 "Guido Dornhege",
                 "Benjamin Blankertz",

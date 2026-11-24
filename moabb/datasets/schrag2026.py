@@ -1,7 +1,7 @@
 """Pediatric SSVEP-based BCI dataset (Schrag et al. 2026).
 
 Preprint DOI: 10.21203/rs.3.rs-9347306/v1
-Data DOI:     10.5281/zenodo.19440997
+Data DOI:     10.5281/zenodo.20848097
 """
 
 from __future__ import annotations
@@ -126,6 +126,18 @@ class Schrag2026Pediatric(BaseDataset):
         corner-to-frequency mapping (randomised across the game; not
         currently exposed by this loader).
 
+    .. warning::
+        A game run whose ``Trial Started`` marker count drifts more than
+        10%% from its movements-CSV row count has all its labels dropped
+        (see :func:`_load_game_run`); that run is then **skipped** rather
+        than returned, with a logged warning naming the subject and run.
+        At least one subject (subject 1, personal-stimulus run) is known
+        to hit this on the released archive. A subject whose every game
+        run drifts this way yields zero runs; ``_get_single_subject_data``
+        then raises ``FileNotFoundError`` instead of writing an
+        unannotated ``Raw`` (BIDS requires every ``Raw`` to carry
+        annotations).
+
     .. note::
         Zenodo publishes one archive per subject, so loading a subject
         downloads only that subject (~20-40 MB).
@@ -138,14 +150,17 @@ class Schrag2026Pediatric(BaseDataset):
        interface dataset in children and adolescents," Research Square
        preprint, 2026. DOI: 10.21203/rs.3.rs-9347306/v1
     .. [2] Schrag et al., 2026 SSVEP Pediatric Dataset.
-       Zenodo. DOI: 10.5281/zenodo.19440997
+       Zenodo. DOI: 10.5281/zenodo.20848097 (v3.0; v1.0: 10.5281/zenodo.19440997)
     """
+
+    nemar_id = "nm000334"
+    nemar_seed_cache = True
 
     METADATA = DatasetMetadata(
         acquisition=AcquisitionMetadata(
             sampling_rate=_SFREQ,
             channel_types={"eeg": 16},
-            montage="standard_1020",
+            montage="standard_1005",
             hardware="g.tec g.GAMMAsys + g.USBamp + g.GAMMAcap",
             sensors=list(_CH_NAMES),
             reference="earlobe",
@@ -155,11 +170,12 @@ class Schrag2026Pediatric(BaseDataset):
             electrode_type="wet",
             electrode_material="Ag/AgCl gel",
             cap_manufacturer="g.tec",
-            software="Unity3D + BCI-Essentials",
+            software="Unity3D + BCI-Essentials + Lab Streaming Layer (LSL)",
         ),
         participants=ParticipantMetadata(
             n_subjects=_N_SUBJECTS,
             health_status="healthy",
+            gender={"female": 19, "male": 28},
             age_mean=12.6,
             age_std=3.9,
             age_min=5,
@@ -191,8 +207,14 @@ class Schrag2026Pediatric(BaseDataset):
             ),
         ),
         documentation=DocumentationMetadata(
-            doi=_DOI,
+            funding=[
+                "Alberta Innovates",
+                "Cumming School of Medicine",
+                "Alberta Children's Hospital Foundation (No. 10026817)",
+            ],
+            doi=_PREPRINT_DOI,
             associated_paper_doi=_PREPRINT_DOI,
+            related_paper_dois=[_DOI, "10.5281/zenodo.19440997"],
             data_url=f"https://doi.org/{_DOI}",
             investigators=[
                 "Emily Schrag",
@@ -212,7 +234,7 @@ class Schrag2026Pediatric(BaseDataset):
             license="CC-BY-4.0",
             publication_year=2026,
             ethics_approval=[
-                "University of Calgary Conjoint Health Research Ethics Board, REB25-0723"
+                "University of Calgary Conjoint Health Research Ethics Board (REB25-0723)"
             ],
             keywords=[
                 "SSVEP",
@@ -294,7 +316,23 @@ class Schrag2026Pediatric(BaseDataset):
             if m is None:
                 continue
             key = _R_STD if m.group(2) == "BW" else _R_PERS
-            runs[key] = _load_game_run(path)
+            raw = _load_game_run(path)
+            if len(raw.annotations) == 0:
+                # The >10% Trial/CSV drift policy in _load_game_run already
+                # dropped every label for this run (logged there as an
+                # [ERROR]); a zero-annotation Raw cannot be written to BIDS
+                # (bids_interface._write_file requires annotations), so skip
+                # the run entirely rather than return unusable data.
+                log.warning(
+                    "Subject %d: run %r (%s) has zero labelled trials after "
+                    "the >10%% drift policy dropped all labels; skipping "
+                    "this run instead of returning an unannotated Raw.",
+                    subject,
+                    key,
+                    path.name,
+                )
+                continue
+            runs[key] = raw
 
         # Personalization (T1) is a single XDF per subject, opt-in, third run.
         if self.include_personalization:
@@ -317,6 +355,16 @@ class Schrag2026Pediatric(BaseDataset):
     ):
         if subject not in self.subject_list:
             raise ValueError(f"Invalid subject number: {subject}")
+
+        # A seeded NEMAR store (or an earlier extraction) already holds the
+        # subject tree; only download the ZIP when it is not there.
+        seeded_dir = (
+            Path(dl.get_dataset_path(_SIGN, path))
+            / f"MNE-{_SIGN.lower()}-data"
+            / f"P{subject:03d}"
+        )
+        if not force_update and (seeded_dir / "EEG").is_dir():
+            return str(seeded_dir)
 
         # The Zenodo download URL ends in "/content", so name the file
         # explicitly rather than letting it be derived from the URL.
@@ -397,7 +445,7 @@ def _build_raw(eeg_stream, annotations):
     info = mne.create_info(_CH_NAMES, _SFREQ, ch_types="eeg")
     raw = mne.io.RawArray(data, info, verbose=False)
     raw.set_montage(
-        mne.channels.make_standard_montage("standard_1020"), on_missing="ignore"
+        mne.channels.make_standard_montage("colin27_1020"), on_missing="ignore"
     )
 
     if len(annotations):
@@ -423,7 +471,9 @@ def _load_game_run(fpath):
     Trials are paired with CSV rows by index. Some sessions have a few
     extra trailing CSV rows from end-of-game bookkeeping; if the count
     drift is large (>10 percent) we drop the run's labels entirely rather
-    than emit silently-shifted ones.
+    than emit silently-shifted ones. The caller (``_get_single_subject_data``)
+    then skips the resulting zero-annotation run instead of returning it, so
+    a high-drift run never reaches the BIDS writer unannotated.
     """
     eeg_stream, marker_stream = _load_xdf_streams(fpath)
     marker_ts, markers = _read_unity_markers(marker_stream)

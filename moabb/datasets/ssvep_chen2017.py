@@ -22,6 +22,7 @@ from .metadata.schema import (
     BCIApplicationMetadata,
     CrossValidationMetadata,
     DatasetMetadata,
+    DataStructureMetadata,
     DocumentationMetadata,
     ExperimentMetadata,
     ParadigmSpecificMetadata,
@@ -85,6 +86,7 @@ class Chen2017SingleFlicker(BaseDataset):
             channel_types={"eeg": 32},
             montage="biosemi32",
             hardware="BioSemi ActiveTwo",
+            software="Lab Streaming Layer (LSL), MATLAB, Psychophysics Toolbox",
             reference="CMS/DRL",
             line_freq=50.0,
             sensor_type="active",
@@ -100,6 +102,7 @@ class Chen2017SingleFlicker(BaseDataset):
             age_max=32,
         ),
         experiment=ExperimentMetadata(
+            trial_duration=4.0,
             paradigm="ssvep",
             events={"north": 1, "east": 2, "west": 3, "south": 4},
             n_classes=4,
@@ -158,6 +161,14 @@ class Chen2017SingleFlicker(BaseDataset):
             environment="lab", online_feedback=True, applications=["spatial_navigation"]
         ),
         tags=Tags(pathology=["healthy"], modality=["visual"], type=["perception"]),
+        sessions_per_subject=2,
+        runs_per_session=2,
+        sessions=["0", "1"],
+        data_structure=DataStructureMetadata(
+            n_trials=200,
+            n_trials_per_class={"north": 50, "east": 50, "west": 50, "south": 50},
+            trials_context="training session (session '0'): two blocks of fifty sequences of the four targets each, i.e. 200 cued trials per subject; the online game session (session '1') has a variable number of trials",
+        ),
         file_format="XDF/MAT",
     )
 
@@ -180,6 +191,7 @@ class Chen2017SingleFlicker(BaseDataset):
     # Marker strings in .xdf files -> event IDs
     _XDF_MARKER_MAP = {"N": 1, "E": 2, "W": 3, "S": 4}
     nemar_id = "nm000122"
+    nemar_seed_cache = True
 
     def __init__(self, subjects=None, sessions=None):
         super().__init__(
